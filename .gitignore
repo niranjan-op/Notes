@@ -233,3 +233,13 @@ cmake_install.cmake
 .vscode/
 .idea/
 .DS_Store
+
+#demo 
+demo/
+
+# Virtual environment
+.venv/
+
+# test
+test/
+config.ini
