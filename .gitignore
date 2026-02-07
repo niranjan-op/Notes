@@ -243,3 +243,6 @@ demo/
 # test
 test/
 config.ini
+
+# wheelhouse
+wheelhouse/
