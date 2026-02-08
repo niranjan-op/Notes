@@ -246,3 +246,9 @@ config.ini
 
 # wheelhouse
 wheelhouse/
+
+#stash
+setup_wizard.py
+storage.cpp
+test.py
+test2.py
