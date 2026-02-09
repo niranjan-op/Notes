@@ -2,7 +2,6 @@ import customtkinter as ctk
 from tkinter import filedialog, messagebox
 import os
 from .styles import Colors, Fonts
-
 # Try/Except block to handle config import
 try:
     # FIXED: Use full package path 'app.core' so main.py can resolve it
@@ -48,6 +47,21 @@ class SetupView(ctk.CTkFrame):
         content = ctk.CTkFrame(self.card, fg_color="transparent")
         content.pack(fill="both", expand=True, padx=40, pady=35)
 
+        # --- Back Button ---
+        self.back_btn = ctk.CTkButton(
+            content, 
+            text="← Back", 
+            width=50, 
+            height=20,
+            fg_color="transparent", 
+            text_color=Colors.text_sub,
+            hover_color=Colors.card,
+            font=("Segoe UI", 11),
+            anchor="w",
+            command=lambda: self.controller.show_frame("WelcomeView")
+        )
+        self.back_btn.pack(anchor="w", pady=(0, 5))
+
         # --- Headers ---
         ctk.CTkLabel(
             content, 
@@ -74,32 +88,47 @@ class SetupView(ctk.CTkFrame):
         self.warning_label.pack(pady=(0, 5))
 
         # --- Form: Location ---
-        self.create_label(content, "Database Location")
-        loc_frame = self.create_input_frame(content)
+        # self.create_label(content, "Database Location")
+        # loc_frame = self.create_input_frame(content)
         
-        self.location_entry = ctk.CTkEntry(
-            loc_frame, 
-            border_width=0, 
-            fg_color="transparent", 
+        # self.location_entry = ctk.CTkEntry(
+        #     loc_frame, 
+        #     border_width=0, 
+        #     fg_color="transparent", 
+        #     font=Fonts.body,
+        #     height=40,
+        #     placeholder_text="Select folder...",
+        #     text_color=Colors.text
+        # )
+        # self.location_entry.pack(side="left", fill="x", expand=True, padx=10)
+        # self.location_entry.configure(state="readonly")
+
+        # ctk.CTkButton(
+        #     loc_frame, 
+        #     text="Browse", 
+        #     width=60, 
+        #     height=32, 
+        #     font=Fonts.body_bold,
+        #     fg_color=Colors.bg, 
+        #     text_color=Colors.text, 
+        #     hover_color=Colors.border, 
+        #     # command=self.browse_location
+        # ).pack(side="right", padx=5)
+
+        # --- Form: Vault Name ---
+        self.create_label(content, "Vault Name")
+        name_frame = self.create_input_frame(content)
+
+        self.vault_name_entry = ctk.CTkEntry(
+            name_frame,
+            border_width=0,
+            fg_color="transparent",
             font=Fonts.body,
+            placeholder_text="e.g., Personal",
             height=40,
-            placeholder_text="Select folder...",
             text_color=Colors.text
         )
-        self.location_entry.pack(side="left", fill="x", expand=True, padx=10)
-        self.location_entry.configure(state="readonly")
-
-        ctk.CTkButton(
-            loc_frame, 
-            text="Browse", 
-            width=60, 
-            height=32, 
-            font=Fonts.body_bold,
-            fg_color=Colors.bg, 
-            text_color=Colors.text, 
-            hover_color=Colors.border, 
-            command=self.browse_location
-        ).pack(side="right", padx=5)
+        self.vault_name_entry.pack(side="left", fill="x", expand=True, padx=10)
 
         # --- Form: Password ---
         self.create_label(content, "Master Password")
@@ -239,23 +268,27 @@ class SetupView(ctk.CTkFrame):
     def toggle_theme(self):
         ctk.set_appearance_mode(self.theme_switch.get())
 
-    def browse_location(self):
-        file_path = filedialog.askdirectory(initialdir=os.getcwd())
-        if file_path:
-            self.location_entry.configure(state="normal")
-            self.location_entry.delete(0, "end")
-            self.location_entry.insert(0, file_path)
-            self.location_entry.configure(state="readonly")
+    # def browse_location(self):
+    #     file_path = filedialog.askdirectory(initialdir=os.getcwd())
+    #     if file_path:
+    #         self.location_entry.configure(state="normal")
+    #         self.location_entry.delete(0, "end")
+    #         self.location_entry.insert(0, file_path)
+    #         self.location_entry.configure(state="readonly")
 
     def complete_setup(self):
         # STRIP WHITESPACE to prevent path errors
-        location = self.location_entry.get().strip()
+        # location = self.location_entry.get().strip()
+        name = self.vault_name_entry.get().strip()
         password = self.password_entry.get()
         confirm = self.confirm_password_entry.get()
         theme = self.theme_switch.get()
 
-        if not location:
-            self.show_warning("⚠ Please select a storage location")
+        # if not location:
+        #     self.show_warning("⚠ Please select a storage location")
+        #     return
+        if not name:
+            self.show_warning("⚠ Please enter a vault name")
             return
         if not password or len(password) < 6:
             self.show_warning("⚠ Password must be at least 6 characters")
@@ -264,19 +297,23 @@ class SetupView(ctk.CTkFrame):
             self.show_warning("⚠ Passwords do not match")
             return
 
-        print(f"Creating DB at: {location}")
-        
-        # Call your config backend
-        success = cf.create_config(
-            db_path=location, 
-            theme=theme, 
-            password=password
-        )
+        if cf.search_config():
+            vaults, last_open_vaults = cf.read_config()
+            if name in vaults:
+                self.show_warning("⚠ A vault with this name already exists!")
+                return
+            else:
+                success_config = cf.update_config(name)
+        else:
+            success_config = cf.create_config(name)
+
+        success_db = cf.create_db(password, name)
+        success = success_config and success_db
 
         if success:
             messagebox.showinfo("Success", "Vault initialized!")
-            # Logic to switch screens
-            # self.controller.show_frame("LoginView") 
+            # Retrun to welcome screen to show the new vault
+            self.controller.show_frame("WelcomeView") 
             print("Transitioning to next screen...")
         else:
             self.show_warning("⚠ Failed to create database")

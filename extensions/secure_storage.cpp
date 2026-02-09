@@ -23,9 +23,21 @@ class DbOperations{
             }
         }
 
-        bool connect(const string &password) {
-    string full_path = db_path + "/secure.db";
-    rc = sqlite3_open(full_path.c_str(), &db);
+        // FIXED: name should be const reference
+        bool connect(const string &password, const string &name) {
+            // FIXED: Ensure path separator exists and add .db extension
+            char separator = '/';
+            #ifdef _WIN32
+                separator = '\\';
+            #endif
+            
+            string full_path = db_path;
+            if (!full_path.empty() && full_path.back() != separator) {
+                full_path += separator;
+            }
+            full_path += name + ".db";
+
+            rc = sqlite3_open(full_path.c_str(), &db);
     
     if (rc != SQLITE_OK) {
         cerr << "Cannot open database: " << sqlite3_errmsg(db) << std::endl;

@@ -1,6 +1,7 @@
 import configparser
 import os
 import time
+from pathlib import Path
 
 try:
     # FIXED: Use relative import for sibling file
@@ -14,65 +15,38 @@ except ImportError:
         ss = None
 
 CONFIG_FILE = "config.ini"
+APP_NAME = "Secure Notes"
+base_path = os.getenv('LOCALAPPDATA')
 
-def load_config():
-    if not os.path.exists(CONFIG_FILE):
-        return None
-    else:
-        parser = configparser.ConfigParser()
-        parser.read(CONFIG_FILE)
-        return {
-            'db_path': parser.get('setup', 'db_path'),
-            'theme': parser.get('preferences', 'theme', fallback='Dark')
-        }
-        
-def create_config(db_path: str, theme: str, password: str):
-    if ss is None:
-        print("Error: secure_storage module is missing.")
-        return False
+def ensure_config():
+    config_path = os.path.join(base_path, APP_NAME, CONFIG_FILE)
+    if not os.path.exists(config_path):
+        os.makedirs(os.path.dirname(config_path), exist_ok=True)
+        config = configparser.ConfigParser()
+        config['vaults'] = {'items': ''}
+        config['last_open_vault'] = {'value': ''}
+        with open(config_path, "w") as f:
+            config.write(f)
+    return config_path
 
-    clean_dir_path = os.path.abspath(os.path.normpath(db_path.strip()))
-    print(f"Full db path:{clean_dir_path}")
+def load_config(password,name):
+    # FIXED: Path must include vault name to match create_db structure
+    app_data_path = os.path.join(base_path, APP_NAME, name)
     
-    # 4. Remove existing DB file to ensure fresh creation
-    if os.path.exists(clean_dir_path):
-        try:
-            os.remove(clean_dir_path)
-            time.sleep(0.1) 
-            print("Removed existing DB file.")
-        except Exception as e:
-            print(f"Warning: Could not remove existing file: {e}")
-
-    # 5. Connect and Create DB
-    try:
-        # Strategy A: Use Native OS Path
-        print(f"Attempting creation with native path: {clean_dir_path}")
-        db = ss.DbOperations(clean_dir_path)
-        
-        if db.connect(password):
-            print("Connection successful! Database created.")
-            write_config_file(clean_dir_path, theme)
+    if os.path.exists(app_data_path):
+        print("Attempting db recovery...")
+        db = ss.DbOperations(str(app_data_path))
+        if db.connect(str(password), str(name)):
+            print("Connection successful! Database recovered successfully.") 
             return True
         else:
-            print("Native path failed. Attempting fallback...")
-            
-            # Strategy B: Force Forward Slashes (Unix Style fallback)
-            fallback_path = clean_dir_path.replace("\\", "/")
-            print(f"Attempting creation with fallback path: {fallback_path}")
-            
-            db_retry = ss.DbOperations(fallback_path)
-            if db_retry.connect(password):
-                print("Fallback connection successful!")
-                write_config_file(clean_dir_path, theme) # Save the native path to config
-                return True
-                
-            print("All creation strategies failed.")
+            print("Database recovery failed!")
             return False
-            
-    except Exception as e:
-        print(f"CRITICAL EXCEPTION during DB creation: {e}")
+    else:
+        # Fallback or error if directory doesn't exist
+        print(f"Vault directory not found: {app_data_path}")
         return False
-
+        
 def write_config_file(path, theme):
     config = configparser.ConfigParser()
     config['setup'] = { 'db_path': path }
@@ -84,6 +58,111 @@ def write_config_file(path, theme):
     # Print absolute path of the created config file
     abs_config_path = os.path.abspath(CONFIG_FILE)
     print(f"Config file updated successfully at: {abs_config_path}")
+
+def search_config():
+    if os.path.exists(os.path.join(base_path,APP_NAME,CONFIG_FILE)):
+        return True
+    else:
+        return False
+
+def read_config():
+    config_path = ensure_config()
+    config = configparser.ConfigParser()
+    config.read(config_path)
+    vaults_csv = config.get('vaults', 'items', fallback='')
+    vaults = [v for v in vaults_csv.split(',') if v]
+    last_open_vault = config.get('last_open_vault', 'value', fallback='')
+    return vaults, last_open_vault
+
+def create_config(vault_name: str):
+    config_path = ensure_config()
+    config = configparser.ConfigParser()
+    config.read(config_path)
+
+    vaults_csv = config.get('vaults', 'items', fallback='')
+    vaults = [v for v in vaults_csv.split(',') if v]
+    if vault_name not in vaults:
+        vaults.append(vault_name)
+
+    config['vaults'] = {'items': ','.join(vaults)}
+    config['last_open_vault'] = {'value': vault_name}
+
+    with open(config_path, "w") as f:
+        config.write(f)
+
+    print(f"Vaults:{vaults}")
+    print(f"last_open_vault:{vault_name}")
+    print("Config Creation Successful!")
+    return True
+
+def update_config(vault_name: str):
+    config_path = ensure_config()
+    config = configparser.ConfigParser()
+    config.read(config_path)
+
+    vaults_csv = config.get('vaults', 'items', fallback='')
+    vaults = [v for v in vaults_csv.split(',') if v]
+    if vault_name not in vaults:
+        vaults.append(vault_name)
+
+    config['vaults'] = {'items': ','.join(vaults)}
+    config['last_open_vault'] = {'value': vault_name}
+
+    with open(config_path, "w") as f:
+        config.write(f)
+
+    print("Successfully updated config file")
+    print(f"Vaults:{vaults}")
+    print(f"last_open_vault:{vault_name}")
+    return True
+
+def create_db(password: str, name:str):
+    if ss is None:
+        raise ImportError("secure_storage module is missing.")
+    
+    # CHANGED: Create a sub-directory for the specific vault to avoid conflicts with global config
+    clean_dir_path = Path(base_path) / APP_NAME / name
+    
+    print(f"Full db path:{clean_dir_path}")
+
+    if os.path.exists(clean_dir_path):
+        raise FileExistsError(f"Vault directory already exists: {clean_dir_path}")
+    
+    # ADDED: Ensure the directory exists so C++ can create the .db file inside it
+    os.makedirs(clean_dir_path, exist_ok=True)
+
+    # 5. Connect and Create DB
+    try:
+        # Strategy A: Use Native OS Path
+        print(f"Attempting creation with native path: {clean_dir_path}")
+        
+        # FIXED: Cast Path object to string because C++ extension expects std::string
+        db = ss.DbOperations(str(clean_dir_path))
+        
+        if db.connect(password,name):
+            print("Connection successful! Database created.")
+            # REMOVED: write_config_file(clean_dir_path) 
+            # We rely on create_config/update_config to track vaults in the central config.ini
+            return True
+        else:
+            print("Native path failed. Attempting fallback...")
+            
+            # Strategy B: Force Forward Slashes (Unix Style fallback)
+            fallback_path = str(clean_dir_path).replace("\\", "/")
+            print(f"Attempting creation with fallback path: {fallback_path}")
+            
+            db_retry = ss.DbOperations(fallback_path)
+            if db_retry.connect(password,name):
+                print("Fallback connection successful!")
+                return True
+                
+            print("All creation strategies failed.")
+            return False
+            
+    except Exception as e:
+        print(f"CRITICAL EXCEPTION during DB creation: {e}")
+        return False
+
 
 
 

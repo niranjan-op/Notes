@@ -247,8 +247,14 @@ config.ini
 # wheelhouse
 wheelhouse/
 
-#stash
-setup_wizard.py
+#exe config
+pyproject.toml
+setup.py
+
+#dlls
+libcrypto-3-x64.pdb
+libssl-3-x64.pdb
+
+#reference files
 storage.cpp
-test.py
-test2.py
+app.py
