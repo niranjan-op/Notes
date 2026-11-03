@@ -225,7 +225,7 @@ class LoginView(ctk.CTkFrame):
         # Attempt to verify with backend
         if cf.load_config(password, self.vault_name):
             print("Login successful. Transitioning...")
-            # self.controller.show_frame("MainView") 
+            self.controller.show_frame("MainView", context={"vault_name": self.vault_name, "password": password})
         else:
             self.show_warning("⚠ Wrong Password")
             self.password_entry.delete(0, 'end')

@@ -31,6 +31,7 @@ MANIFEST
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+!NotesApp.spec
 
 # Installer logs
 pip-log.txt
@@ -250,6 +251,8 @@ wheelhouse/
 #exe config
 pyproject.toml
 setup.py
+!pyproject.toml
+!setup.py
 
 #dlls
 libcrypto-3-x64.pdb

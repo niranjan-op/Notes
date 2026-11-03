@@ -14,9 +14,9 @@ using namespace std;
 struct Note
 {
     int id;
-    int parent_folder_id;
+    int folder_id;
     string content;
-    string name;
+    string title;
     bool is_md;
     string created_at;
     string updated_at;
@@ -303,6 +303,34 @@ public:
         return notes;
     }
 
+    vector<Note> get_all_notes()
+    {
+        vector<Note> notes;
+        sqlite3_stmt *stmt;
+        const char *sql = "SELECT note_id, folder_id, title, content, is_markdown, created_at, updated_at FROM notes ORDER BY updated_at DESC, note_id DESC;";
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) == SQLITE_OK)
+        {
+            while (sqlite3_step(stmt) == SQLITE_ROW)
+            {
+                Note note;
+                note.id = sqlite3_column_int(stmt, 0);
+                note.folder_id = sqlite3_column_int(stmt, 1);
+                const unsigned char *title = sqlite3_column_text(stmt, 2);
+                const unsigned char *content = sqlite3_column_text(stmt, 3);
+                note.title = title ? reinterpret_cast<const char *>(title) : "";
+                note.content = content ? reinterpret_cast<const char *>(content) : "";
+                note.is_md = sqlite3_column_int(stmt, 4) != 0;
+                const unsigned char *created_at = sqlite3_column_text(stmt, 5);
+                const unsigned char *updated_at = sqlite3_column_text(stmt, 6);
+                note.created_at = created_at ? reinterpret_cast<const char *>(created_at) : "";
+                note.updated_at = updated_at ? reinterpret_cast<const char *>(updated_at) : "";
+                notes.emplace_back(note);
+            }
+        }
+        sqlite3_finalize(stmt);
+        return notes;
+    }
+
     vector<Folder> get_all_folders()
     {
         vector<Folder> folders;
@@ -330,6 +358,15 @@ public:
 };
 PYBIND11_MODULE(secure_storage, m)
 {
+    py::class_<Note>(m, "Note")
+        .def_readonly("id", &Note::id)
+        .def_readonly("folder_id", &Note::folder_id)
+        .def_readonly("title", &Note::title)
+        .def_readonly("content", &Note::content)
+        .def_readonly("is_markdown", &Note::is_md)
+        .def_readonly("created_at", &Note::created_at)
+        .def_readonly("updated_at", &Note::updated_at);
+
     py::class_<MiniNote>(m, "MiniNote")
         .def_readonly("note_id", &MiniNote::note_id)
         .def_readonly("folder_id", &MiniNote::folder_id)
@@ -348,8 +385,10 @@ PYBIND11_MODULE(secure_storage, m)
         .def(py::init<const string &>())
         .def("connect", &DbOperations::connect)
         .def("close", &DbOperations::close)
-        .def("add_note", &DbOperations::add_note)
-        .def("add_folder", &DbOperations::add_folder)
+        .def("add_note", &DbOperations::add_note,
+             py::arg("title"), py::arg("content"), py::arg("is_md"), py::arg("folder_id") = 0)
+        .def("add_folder", &DbOperations::add_folder,
+             py::arg("name"), py::arg("parent_id") = 0)
         .def("update_note", &DbOperations::update_note,
              py::arg("id"),
              py::arg("title") = py::none(),
@@ -359,5 +398,6 @@ PYBIND11_MODULE(secure_storage, m)
         .def("delete_note", &DbOperations::delete_note)
         .def("delete_folder", &DbOperations::delete_folder)
         .def("get_all_mini_notes", &DbOperations::get_all_mini_notes)
+        .def("get_all_notes", &DbOperations::get_all_notes)
         .def("get_all_folders", &DbOperations::get_all_folders);
 }

@@ -2,14 +2,15 @@ import customtkinter as ctk
 from app.UI.setup_view import SetupView
 from app.UI.login_view import LoginView
 from app.UI.welcome_view import WelcomeView
+from app.UI.main_view import MainView
 import app.core.config as cf
 
 class MainApp(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("Notes App")
-        self.geometry("800x600")
-        self.resizable(False, False)
+        self.geometry("1280x760")
+        self.minsize(980, 620)
         
         self.container = ctk.CTkFrame(self)
         self.container.pack(fill="both", expand=True)
@@ -23,7 +24,7 @@ class MainApp(ctk.CTk):
         # 2. Initialize ALL views (Loop approach)
         # We load both now so you can seamlessly switch between them later
         # Note: We use login_view.LoginView because of your import style
-        for F in (WelcomeView, SetupView, LoginView):
+        for F in (WelcomeView, SetupView, LoginView, MainView):
             page_name = F.__name__
             frame = F(parent=self.container, controller=self)
             self.frames[page_name] = frame

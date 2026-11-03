@@ -16,7 +16,11 @@ except ImportError:
 
 CONFIG_FILE = "config.ini"
 APP_NAME = "Secure Notes"
-base_path = os.getenv('LOCALAPPDATA')
+base_path = os.getenv('LOCALAPPDATA') or str(Path.home() / "AppData" / "Local")
+
+def vault_path(name: str) -> Path:
+    """Return the private on-device directory for one vault."""
+    return Path(base_path) / APP_NAME / name
 
 def ensure_config():
     config_path = os.path.join(base_path, APP_NAME, CONFIG_FILE)
@@ -31,7 +35,7 @@ def ensure_config():
 
 def load_config(password,name):
     # FIXED: Path must include vault name to match create_db structure
-    app_data_path = os.path.join(base_path, APP_NAME, name)
+    app_data_path = vault_path(name)
     
     if os.path.exists(app_data_path):
         print("Attempting db recovery...")
@@ -121,7 +125,7 @@ def create_db(password: str, name:str):
         raise ImportError("secure_storage module is missing.")
     
     # CHANGED: Create a sub-directory for the specific vault to avoid conflicts with global config
-    clean_dir_path = Path(base_path) / APP_NAME / name
+    clean_dir_path = vault_path(name)
     
     print(f"Full db path:{clean_dir_path}")
 
