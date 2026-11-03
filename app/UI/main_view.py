@@ -1,313 +1,995 @@
-import math
+"""The unlocked, local-first Markdown workspace."""
+
+from __future__ import annotations
+
 import re
-from pathlib import Path
 import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog
+from pathlib import Path
+from tkinter import filedialog
 
 import customtkinter as ctk
 
-from app.core.vault import Vault
-from .styles import Colors, Fonts
+import app.core.config as cf
+from app.core.vault import DuplicateNameError, Vault
+from .brand import icon_image, logo_image
+from .components import (
+    Dialog, confirm, field_label, icon_button, primary_button, secondary_button, text_entry,
+)
+from .styles import MONO_FAMILY, Colors, Fonts, Metrics, resolve
+
+WIKI_LINK_PATTERN = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]")
+INLINE_PATTERN = re.compile(r"\*\*(.+?)\*\*|`([^`]+)`|\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|([^\]]+))?\]\]")
+EDITOR_FONTS = ("Segoe UI", "Cascadia Mono", "Georgia")
+AUTOSAVE_DELAY_MS = 650
+SEARCH_DELAY_MS = 180
+NARROW_WIDTH = 1060
+WELCOME_TITLE = "Welcome to your vault"
+WELCOME_BODY = (
+    "# Your notes, connected\n\n"
+    "Write in Markdown. Headings, **bold**, `code` and [[wiki links]] format as you type.\n\n"
+    "- New note: Ctrl+N\n"
+    "- New folder: Ctrl+Shift+N\n"
+    "- Search: Ctrl+F\n"
+    "- Lock vault: Ctrl+L\n"
+    "- Right-click a note or folder for more actions\n"
+)
+
+TreeKey = tuple[str, int]  # ("note" | "folder", id)
 
 
 class MainView(ctk.CTkFrame):
-    """The unlocked, local-first Markdown workspace."""
+    """Three-pane workspace: file tree, editor and backlinks."""
 
     def __init__(self, parent, controller):
-        super().__init__(parent, fg_color=Colors.bg)
+        super().__init__(parent, fg_color=Colors.bg, corner_radius=0)
         self.controller = controller
-        self.vault = None
-        self.note_id = None
-        self.folder_id = 0
+        self.vault: Vault | None = None
+        self.note_id: int | None = None
+        self.folder_id = 0                      # folder of the open note
+        self.selection: TreeKey | None = None   # highlighted tree item
+        self.expanded_folders: set[int] = set()
+        self._all_notes = []
+        self._folders = []
+        self._rows: dict[TreeKey, tuple[ctk.CTkFrame, ctk.CTkLabel]] = {}
+        self._hover_key: TreeKey | None = None
         self._save_job = None
-        self._notes = []
+        self._search_job = None
+        self._saved_title = ""
+        self._editor_family = cf.get_preference("editor_font", EDITOR_FONTS[0])
+        if self._editor_family not in EDITOR_FONTS:
+            self._editor_family = EDITOR_FONTS[0]
+        self._context_visible = True
+        self._auto_collapsed = False
+        self.settings_dialog: Dialog | None = None
         self._build()
+        self._bind_shortcuts()
 
-    def _build(self):
-        self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(1, weight=1)
+    # ------------------------------------------------------------------ layout
+    def _build(self) -> None:
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(2, weight=1)
+        self._build_sidebar()
+        ctk.CTkFrame(self, width=1, corner_radius=0, fg_color=Colors.border).grid(row=0, column=1, sticky="ns")
+        self._build_editor()
+        self.context_divider = ctk.CTkFrame(self, width=1, corner_radius=0, fg_color=Colors.border)
+        self.context_divider.grid(row=0, column=3, sticky="ns")
+        self._build_context_panel()
+        self.bind("<Configure>", self._on_resize, add="+")
 
-        bar = ctk.CTkFrame(self, fg_color=Colors.card, corner_radius=0, height=52)
-        bar.grid(row=0, column=0, columnspan=3, sticky="ew")
-        bar.grid_columnconfigure(2, weight=1)
-        ctk.CTkLabel(bar, text="◈  Notes", font=("Segoe UI", 16, "bold"), text_color=Colors.text).grid(row=0, column=0, padx=18, pady=12)
-        ctk.CTkButton(bar, text="+ Note", width=76, height=30, command=self.new_note, fg_color=Colors.primary, hover_color=Colors.primary_hover).grid(row=0, column=1, padx=(0, 8), pady=8)
-        self.search = ctk.CTkEntry(bar, placeholder_text="Search notes", width=220, height=30)
-        self.search.grid(row=0, column=2, sticky="e", padx=8, pady=8)
-        self.search.bind("<KeyRelease>", lambda _event: self.refresh_notes())
-        ctk.CTkButton(bar, text="Graph view", width=92, height=30, fg_color="transparent", border_width=1, border_color=Colors.border, text_color=Colors.text, command=self.show_graph).grid(row=0, column=3, padx=8, pady=8)
-        ctk.CTkButton(bar, text="Settings", width=76, height=30, fg_color="transparent", text_color=Colors.text_sub, command=self.show_settings).grid(row=0, column=4, padx=(0, 12), pady=8)
+    def _build_sidebar(self) -> None:
+        side = ctk.CTkFrame(self, width=Metrics.sidebar_width, fg_color=Colors.sidebar, corner_radius=0)
+        side.grid(row=0, column=0, sticky="nsew")
+        side.grid_propagate(False)
+        side.grid_columnconfigure(0, weight=1)
+        side.grid_rowconfigure(2, weight=1)
 
-        left = ctk.CTkFrame(self, width=235, fg_color=Colors.card, corner_radius=0)
-        left.grid(row=1, column=0, sticky="nsew")
-        left.grid_propagate(False)
-        ctk.CTkLabel(left, text="Your vault", font=("Segoe UI", 15, "bold"), text_color=Colors.text).pack(anchor="w", padx=16, pady=(16, 7))
-        ctk.CTkButton(left, text="＋  New folder", height=30, fg_color="transparent", text_color=Colors.primary, anchor="w", command=self.new_folder).pack(fill="x", padx=10, pady=(0, 6))
-        self.folders = ctk.CTkScrollableFrame(left, fg_color="transparent", height=150)
-        self.folders.pack(fill="x", padx=8)
-        ctk.CTkLabel(left, text="Notes", font=("Segoe UI", 13, "bold"), text_color=Colors.text_sub).pack(anchor="w", padx=16, pady=(8, 7))
-        self.note_list = ctk.CTkScrollableFrame(left, fg_color="transparent")
-        self.note_list.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        header = ctk.CTkFrame(side, fg_color="transparent", height=48)
+        header.grid(row=0, column=0, sticky="ew", padx=(12, 8), pady=(8, 0))
+        header.grid_columnconfigure(1, weight=1)
+        self.logo = logo_image(22)
+        ctk.CTkLabel(header, text="", image=self.logo, width=22).grid(row=0, column=0, padx=(0, 8))
+        self.vault_label = ctk.CTkLabel(header, text="Vault", font=Fonts.body_bold, text_color=Colors.text, anchor="w")
+        self.vault_label.grid(row=0, column=1, sticky="ew")
+        icon_button(header, "note_plus", self.new_note, "New note  (Ctrl+N)", size=28, icon_size=16).grid(
+            row=0, column=2)
+        icon_button(header, "folder_plus", lambda: self.new_folder(), "New folder  (Ctrl+Shift+N)", size=28,
+                    icon_size=16).grid(row=0, column=3)
 
+        search_box = ctk.CTkFrame(side, fg_color=Colors.input_bg, border_width=1, border_color=Colors.border,
+                                  corner_radius=Metrics.radius, height=32)
+        search_box.grid(row=1, column=0, sticky="ew", padx=12, pady=(6, 8))
+        search_box.pack_propagate(False)
+        ctk.CTkLabel(search_box, text="", image=icon_image("search", 14, "faint"), width=16).pack(side="left",
+                                                                                                padx=(9, 2))
+        self.search = ctk.CTkEntry(search_box, placeholder_text="Search  (Ctrl+F)", border_width=0,
+                                   fg_color="transparent", text_color=Colors.text, font=Fonts.body,
+                                   placeholder_text_color=Colors.text_faint, height=28)
+        self.search.pack(side="left", fill="both", expand=True, padx=(0, 6), pady=1)
+        self.search.bind("<KeyRelease>", self.queue_search)
+        self.search.bind("<Escape>", lambda _e: (self.search.delete(0, "end"), self.refresh_tree()))
+
+        self.tree = ctk.CTkScrollableFrame(side, fg_color="transparent", corner_radius=0,
+                                           scrollbar_button_color=Colors.border,
+                                           scrollbar_button_hover_color=Colors.text_faint)
+        self.tree.grid(row=2, column=0, sticky="nsew", padx=(4, 0))
+        self.tree.bind("<Button-1>", lambda _e: self._select(None))
+        self.tree.bind("<Button-3>", lambda e: self._show_context_menu(e, None))
+        self.row_action = icon_button(self.tree, "trash", self._delete_hovered, "Delete", size=22, icon_size=14)
+
+        ctk.CTkFrame(side, height=1, corner_radius=0, fg_color=Colors.border).grid(row=3, column=0, sticky="ew")
+        footer = ctk.CTkFrame(side, fg_color="transparent", height=44)
+        footer.grid(row=4, column=0, sticky="ew", padx=8, pady=6)
+        icon_button(footer, "settings", self.show_settings, "Settings  (Ctrl+,)").pack(side="left")
+        icon_button(footer, "theme", self.toggle_theme, "Toggle light / dark").pack(side="left", padx=(2, 0))
+        icon_button(footer, "lock", self.lock, "Lock vault  (Ctrl+L)").pack(side="right")
+
+    def _build_editor(self) -> None:
         center = ctk.CTkFrame(self, fg_color=Colors.bg, corner_radius=0)
-        center.grid(row=1, column=1, sticky="nsew")
+        center.grid(row=0, column=2, sticky="nsew")
         center.grid_rowconfigure(2, weight=1)
-        center.grid_columnconfigure(0, weight=1, uniform="editor")
-        center.grid_columnconfigure(1, weight=1, uniform="editor")
-        self.title = ctk.CTkEntry(center, placeholder_text="Untitled note", font=("Segoe UI", 22, "bold"), border_width=0, fg_color="transparent", text_color=Colors.text)
-        self.title.grid(row=0, column=0, sticky="ew", padx=24, pady=(18, 5))
+        center.grid_columnconfigure(0, weight=1)
+
+        bar = ctk.CTkFrame(center, fg_color="transparent", height=44)
+        bar.grid(row=0, column=0, sticky="ew", padx=(28, 12), pady=(6, 0))
+        bar.grid_columnconfigure(0, weight=1)
+        self.breadcrumb = ctk.CTkLabel(bar, text="", font=Fonts.small, text_color=Colors.text_sub, anchor="w")
+        self.breadcrumb.grid(row=0, column=0, sticky="ew")
+        self.status = ctk.CTkLabel(bar, text="", font=Fonts.small, text_color=Colors.text_faint)
+        self.status.grid(row=0, column=1, padx=(8, 8))
+        self.delete_button = icon_button(bar, "trash", self.delete_current_note, "Delete note")
+        self.delete_button.grid(row=0, column=2)
+        icon_button(bar, "panel_right", self.toggle_context_panel, "Toggle backlinks panel").grid(
+            row=0, column=3, padx=(2, 0))
+
+        self.title = ctk.CTkEntry(center, placeholder_text="Untitled", font=Fonts.title, border_width=0,
+                                  fg_color="transparent", text_color=Colors.text,
+                                  placeholder_text_color=Colors.text_faint, height=48)
+        self.title.grid(row=1, column=0, sticky="ew", padx=(24, 28), pady=(4, 2))
         self.title.bind("<KeyRelease>", self.queue_save)
-        ctk.CTkButton(center, text="Delete note", width=92, height=28, fg_color="transparent", text_color="#D97985", command=self.delete_current_note).grid(row=0, column=1, sticky="e", padx=(0, 22), pady=(18, 5))
-        self.meta = ctk.CTkLabel(center, text="Markdown source", text_color=Colors.text_sub, font=("Segoe UI", 11))
-        self.meta.grid(row=1, column=0, sticky="w", padx=26, pady=(0, 8))
-        ctk.CTkLabel(center, text="Live preview", text_color=Colors.text_sub, font=("Segoe UI", 11)).grid(row=1, column=1, sticky="w", padx=14, pady=(0, 8))
-        self.editor = ctk.CTkTextbox(center, wrap="word", font=("Cascadia Code", 13), fg_color=Colors.card, text_color=Colors.text, border_width=1, border_color=Colors.border)
-        self.editor.grid(row=2, column=0, sticky="nsew", padx=(20, 8), pady=(0, 18))
-        self.preview = tk.Text(center, wrap="word", font=("Segoe UI", 14), padx=18, pady=18, relief="flat", borderwidth=0, state="disabled", background="#202938", foreground="#E7ECF4", insertbackground="#E7ECF4")
-        self.preview.grid(row=2, column=1, sticky="nsew", padx=(8, 20), pady=(0, 18))
-        self.preview.tag_configure("h1", font=("Segoe UI", 26, "bold"), spacing3=14, foreground="#F5F7FB")
-        self.preview.tag_configure("h2", font=("Segoe UI", 21, "bold"), spacing3=12, foreground="#F5F7FB")
-        self.preview.tag_configure("h3", font=("Segoe UI", 17, "bold"), spacing3=10, foreground="#F5F7FB")
-        self.preview.tag_configure("bold", font=("Segoe UI", 14, "bold"))
-        self.preview.tag_configure("code", font=("Cascadia Code", 12), background="#303B4D", foreground="#A5D6C8")
-        self.preview.tag_configure("muted", foreground="#A8B3C5")
+        self.title.bind("<Return>", lambda _e: (self.editor.focus_set(), "break")[1])
+
+        self.editor = ctk.CTkTextbox(center, wrap="word", font=(self._editor_family, 15), fg_color=Colors.bg,
+                                     text_color=Colors.text, border_width=0, corner_radius=0,
+                                     scrollbar_button_color=Colors.border,
+                                     scrollbar_button_hover_color=Colors.text_faint)
+        self.editor.grid(row=2, column=0, sticky="nsew", padx=(24, 8), pady=(0, 12))
+        text = self.editor._textbox
+        text.configure(spacing1=2, spacing3=4, padx=4, undo=True, maxundo=-1, autoseparators=True)
+        text.tag_bind("md-link", "<Button-1>", self.open_wiki_link)
+        text.tag_bind("md-link", "<Enter>", lambda _e: text.configure(cursor="hand2"))
+        text.tag_bind("md-link", "<Leave>", lambda _e: text.configure(cursor="xterm"))
+        self.empty_hint = ctk.CTkLabel(self.editor, text="Start writing — Markdown formats as you type.",
+                                       font=Fonts.body, text_color=Colors.text_faint)
+        self.empty_hint.bind("<Button-1>", lambda _e: self.editor.focus_set())
         self.editor.bind("<KeyRelease>", self.queue_save)
-        self.editor.bind("<KeyRelease>", self.render_preview, add="+")
+        self.editor.bind("<KeyRelease>", self.render_markdown, add="+")
+        self.editor.bind("<Control-s>", self.save)
+        self.title.bind("<Control-s>", self.save)
 
-        right = ctk.CTkFrame(self, width=245, fg_color=Colors.card, corner_radius=0)
-        right.grid(row=1, column=2, sticky="nsew")
-        right.grid_propagate(False)
-        self.side_title = ctk.CTkLabel(right, text="BACKLINKS", font=Fonts.body_bold, text_color=Colors.text_sub)
-        self.side_title.pack(anchor="w", padx=16, pady=(16, 8))
-        self.side = ctk.CTkScrollableFrame(right, fg_color="transparent")
-        self.side.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.empty_state = ctk.CTkFrame(center, fg_color=Colors.bg, corner_radius=0)
+        ctk.CTkLabel(self.empty_state, text="", image=icon_image("note", 40, "faint")).pack(pady=(0, 12))
+        ctk.CTkLabel(self.empty_state, text="No note open", font=Fonts.header, text_color=Colors.text).pack()
+        ctk.CTkLabel(self.empty_state, text="Select a note in the sidebar or create a new one.",
+                     font=Fonts.body, text_color=Colors.text_sub).pack(pady=(4, 16))
+        primary_button(self.empty_state, "New note", self.new_note, width=120).pack()
 
+    def _build_context_panel(self) -> None:
+        self.context_panel = ctk.CTkFrame(self, width=Metrics.context_width, fg_color=Colors.sidebar,
+                                          corner_radius=0)
+        self.context_panel.grid(row=0, column=4, sticky="nsew")
+        self.context_panel.grid_propagate(False)
+        self.context_panel.grid_columnconfigure(0, weight=1)
+        self.context_panel.grid_rowconfigure(1, weight=1)
+        ctk.CTkLabel(self.context_panel, text="BACKLINKS", font=Fonts.section, text_color=Colors.text_faint,
+                     anchor="w").grid(row=0, column=0, sticky="ew", padx=18, pady=(20, 8))
+        self.side = ctk.CTkScrollableFrame(self.context_panel, fg_color="transparent", corner_radius=0,
+                                           scrollbar_button_color=Colors.border)
+        self.side.grid(row=1, column=0, sticky="nsew", padx=(6, 0), pady=(0, 8))
 
-    def update_view(self, context=None):
+    # -------------------------------------------------------------- shortcuts
+    def _bind_shortcuts(self) -> None:
+        root = self.controller
+        shortcuts = {
+            "<Control-n>": self.new_note,
+            "<Control-N>": lambda: self.new_folder(),
+            "<Control-f>": self._focus_search,
+            "<Control-l>": self.lock,
+            "<Control-comma>": self.show_settings,
+        }
+        for sequence, action in shortcuts.items():
+            root.bind(sequence, lambda _e, action=action: self._run_shortcut(action), add="+")
+
+    def _run_shortcut(self, action):
+        if self.vault is None or self.controller.focus_get() is None:
+            return None
+        if self.settings_dialog is not None and self.settings_dialog.winfo_exists():
+            return None
+        action()
+        return "break"
+
+    def _focus_search(self) -> None:
+        self.search.focus_set()
+        self.search.select_range(0, "end")
+
+    # ------------------------------------------------------------- lifecycle
+    def update_view(self, context=None) -> None:
         if not context:
             return
         try:
             if self.vault:
                 self.vault.close()
             self.vault = Vault(context["vault_name"], context["password"])
-        except (KeyError, ValueError) as error:
-            messagebox.showerror("Vault", str(error))
+        except (KeyError, ValueError):
+            self.vault = None
             self.controller.show_frame("WelcomeView")
             return
+        self.vault_label.configure(text=self.vault.name)
         self.note_id = None
-        self.refresh_folders()
-        self.refresh_notes()
-        if self._notes:
-            self.open_note(self._notes[0].id)
+        self.selection = None
+        self.search.delete(0, "end")
+        self.expanded_folders = set()
+        self._reload()
+        if not self._all_notes and not self._folders:
+            self.vault.create_note(WELCOME_TITLE, WELCOME_BODY)
+            self._reload()
+        self.refresh_tree()
+        recent = self._all_notes[0].id if self._all_notes else None
+        if recent is not None:
+            self.open_note(recent)
         else:
-            self.vault.create_note("Welcome to your vault", "# Your notes, connected\n\nWrite in Markdown on the left. The preview updates as you type.\n\n- Create a note with **+ Note**\n- Link notes with [[wiki links]]\n- Open Graph view to explore connections\n- Create folders from the vault sidebar", self.folder_id)
-            self.refresh_notes()
-            self.open_note(self.vault.notes()[0].id)
+            self._show_empty_state()
+        self._apply_editor_theme()
 
-    def refresh_folders(self):
-        for child in self.folders.winfo_children():
+    def lock(self, navigate: bool = True) -> None:
+        """Save, close the vault and drop decrypted content from the UI."""
+        if self.vault is None:
+            return
+        self.save()
+        for job in (self._save_job, self._search_job):
+            if job:
+                self.after_cancel(job)
+        self._save_job = self._search_job = None
+        if self.settings_dialog is not None and self.settings_dialog.winfo_exists():
+            self.settings_dialog.close()
+        self.vault.close()
+        self.vault = None
+        self.note_id = None
+        self.selection = None
+        self._all_notes, self._folders = [], []
+        self.title.delete(0, "end")
+        self.editor.delete("1.0", "end")
+        self.editor._textbox.edit_reset()
+        self.search.delete(0, "end")
+        self._clear_tree()
+        for child in self.side.winfo_children():
             child.destroy()
-        ctk.CTkButton(self.folders, text="▦  All notes", anchor="w", height=30, fg_color="transparent", text_color=Colors.text, command=lambda: self.select_folder(0)).pack(fill="x")
-        folders = self.vault.folders()
-        children = {}
-        for folder in folders:
-            children.setdefault(folder.parent_id, []).append(folder)
+        if navigate:
+            self.controller.show_frame("WelcomeView")
 
-        def add_folder(folder, depth=0):
-            ctk.CTkButton(self.folders, text=f"{'    ' * depth}▸  {folder.name}", anchor="w", height=28, fg_color=Colors.input_bg if folder.id == self.folder_id else "transparent", text_color=Colors.text, command=lambda folder_id=folder.id: self.select_folder(folder_id)).pack(fill="x")
-            for child in children.get(folder.id, []):
-                add_folder(child, depth + 1)
+    # ------------------------------------------------------------------ data
+    def _reload(self) -> None:
+        self._all_notes = self.vault.notes() if self.vault else []
+        self._folders = list(self.vault.folders()) if self.vault else []
 
-        for folder in children.get(0, []):
-            add_folder(folder)
+    def _note(self, note_id: int | None):
+        return next((note for note in self._all_notes if note.id == note_id), None)
 
-    def select_folder(self, folder_id):
-        self.folder_id = folder_id
-        self.refresh_notes()
+    def _folder(self, folder_id: int):
+        return next((folder for folder in self._folders if folder.id == folder_id), None)
 
-    def refresh_notes(self):
+    def _folder_path(self, folder_id: int) -> list[str]:
+        names, seen = [], set()
+        while folder_id and folder_id not in seen:
+            seen.add(folder_id)
+            folder = self._folder(folder_id)
+            if folder is None:
+                break
+            names.append(folder.name)
+            folder_id = folder.parent_id
+        return list(reversed(names))
+
+    def _target_folder(self) -> int:
+        """Folder where new notes/folders go, based on the current selection."""
+        if self.selection is None:
+            return 0
+        kind, item_id = self.selection
+        if kind == "folder":
+            return item_id
+        note = self._note(item_id)
+        return note.folder_id if note else 0
+
+    def _expand_to(self, folder_id: int) -> None:
+        seen = set()
+        while folder_id and folder_id not in seen:
+            seen.add(folder_id)
+            self.expanded_folders.add(folder_id)
+            folder = self._folder(folder_id)
+            folder_id = folder.parent_id if folder else 0
+
+    # ------------------------------------------------------------------ tree
+    def _clear_tree(self) -> None:
+        self.row_action.place_forget()
+        for child in self.tree.winfo_children():
+            if child is not self.row_action:
+                child.destroy()
+        self._rows.clear()
+        self._hover_key = None
+
+    def refresh_tree(self) -> None:
+        self._clear_tree()
         if not self.vault:
             return
-        query = self.search.get().casefold() if hasattr(self, "search") else ""
-        self._notes = [note for note in self.vault.notes() if (not self.folder_id or note.folder_id == self.folder_id) and (not query or query in note.title.casefold() or query in note.content.casefold())]
-        for child in self.note_list.winfo_children():
-            child.destroy()
-        for note in self._notes:
-            preview = note.content.replace("\n", " ").strip()[:45] or "Empty note"
-            button = ctk.CTkButton(self.note_list, text=f"{note.title}\n{preview}", anchor="w", height=51, fg_color=Colors.input_bg if note.id == self.note_id else "transparent", hover_color=Colors.input_bg, text_color=Colors.text, command=lambda note_id=note.id: self.open_note(note_id))
-            button.pack(fill="x", pady=1)
+        query = self.search.get().strip().casefold()
+        if query:
+            self._render_search_results(query)
+        else:
+            self._render_hierarchy()
+        self.row_action.lift()
 
-    def open_note(self, note_id):
+    def _render_hierarchy(self) -> None:
+        children: dict[int, list] = {}
+        for folder in self._folders:
+            children.setdefault(folder.parent_id, []).append(folder)
+        notes_by_folder: dict[int, list] = {}
+        for note in self._all_notes:
+            notes_by_folder.setdefault(note.folder_id, []).append(note)
+        known_folders = {folder.id for folder in self._folders}
+
+        def render(parent_id: int, depth: int) -> None:
+            for folder in sorted(children.get(parent_id, []), key=lambda item: item.name.casefold()):
+                expanded = folder.id in self.expanded_folders
+                self._make_row(("folder", folder.id), depth, folder.name, "folder",
+                               "chevron_down" if expanded else "chevron_right")
+                if expanded:
+                    render(folder.id, depth + 1)
+            notes = notes_by_folder.get(parent_id, [])
+            if parent_id == 0:  # notes whose folder no longer exists stay reachable at the root
+                notes = notes + [n for fid, items in notes_by_folder.items() if fid and fid not in known_folders
+                                 for n in items]
+            for note in sorted(notes, key=lambda item: (item.title or "Untitled").casefold()):
+                self._make_row(("note", note.id), depth, note.title or "Untitled", "note")
+
+        render(0, 0)
+        if not self._rows:
+            ctk.CTkLabel(self.tree, text="This vault is empty.", font=Fonts.small, text_color=Colors.text_faint,
+                         anchor="w").pack(fill="x", padx=12, pady=8)
+
+    def _render_search_results(self, query: str) -> None:
+        matches = [note for note in self._all_notes
+                   if query in note.title.casefold() or query in note.content.casefold()]
+        if not matches:
+            ctk.CTkLabel(self.tree, text="No matching notes", font=Fonts.small, text_color=Colors.text_faint,
+                         anchor="w").pack(fill="x", padx=12, pady=8)
+            return
+        for note in sorted(matches, key=lambda item: item.title.casefold()):
+            path = " / ".join(self._folder_path(note.folder_id))
+            self._make_row(("note", note.id), 0, note.title or "Untitled", "note", hint=path)
+
+    def _make_row(self, key: TreeKey, depth: int, text: str, icon: str, chevron: str | None = None,
+                  hint: str = "") -> None:
+        row = ctk.CTkFrame(self.tree, height=Metrics.row_height, corner_radius=Metrics.radius - 2,
+                           fg_color="transparent")
+        row.pack(fill="x", padx=(0, 6), pady=0)
+        row.pack_propagate(False)
+        for level in range(depth):
+            ctk.CTkFrame(row, width=1, corner_radius=0, fg_color=Colors.guide).place(
+                x=13 + level * Metrics.indent, y=0, relheight=1)
+        indent = 4 + depth * Metrics.indent
+        parts = []
+        if chevron:
+            chevron_label = ctk.CTkLabel(row, text="", image=icon_image(chevron, 14, "faint"), width=18)
+            chevron_label.pack(side="left", padx=(indent, 0))
+            parts.append(chevron_label)
+        else:
+            ctk.CTkFrame(row, width=18, height=1, fg_color="transparent").pack(side="left", padx=(indent, 0))
+        icon_label = ctk.CTkLabel(row, text="", image=icon_image(icon, 15), width=20)
+        icon_label.pack(side="left", padx=(0, 4))
+        label = ctk.CTkLabel(row, text=text, font=Fonts.body, text_color=Colors.text, anchor="w")
+        label.pack(side="left", fill="x", expand=True, padx=(0, 28))
+        parts += [icon_label, label]
+        if hint:
+            label.configure(text=f"{text}   ")
+            hint_label = ctk.CTkLabel(row, text=hint, font=Fonts.small, text_color=Colors.text_faint, anchor="e")
+            hint_label.place(relx=1, x=-30, rely=0.5, anchor="e")
+            parts.append(hint_label)
+        for widget in (row, *parts):
+            widget.bind("<Button-1>", lambda _e, key=key: self._on_row_click(key))
+            widget.bind("<Button-3>", lambda e, key=key: self._show_context_menu(e, key))
+            widget.bind("<Enter>", lambda _e, key=key: self._on_row_enter(key))
+            widget.bind("<Leave>", lambda _e, key=key: self._on_row_leave(key))
+        self._rows[key] = (row, label)
+        self._paint_row(key)
+
+    def _paint_row(self, key: TreeKey) -> None:
+        if key not in self._rows:
+            return
+        row, label = self._rows[key]
+        if key == self.selection:
+            color = Colors.selected
+        elif key == ("note", self.note_id):
+            color = Colors.active
+        elif key == self._hover_key:
+            color = Colors.hover
+        else:
+            color = "transparent"
+        row.configure(fg_color=color)
+        label.configure(font=Fonts.body_bold if key == ("note", self.note_id) else Fonts.body)
+
+    def _repaint_rows(self) -> None:
+        for key in self._rows:
+            self._paint_row(key)
+
+    def _on_row_enter(self, key: TreeKey) -> None:
+        if self._hover_key != key:
+            previous, self._hover_key = self._hover_key, key
+            if previous:
+                self._paint_row(previous)
+            self._paint_row(key)
+        row, _ = self._rows[key]
+        self.row_action.place(in_=row, relx=1, x=-4, rely=0.5, anchor="e")
+        self.row_action.lift()
+
+    def _on_row_leave(self, key: TreeKey) -> None:
+        self.after(15, lambda: self._check_hover(key))
+
+    def _check_hover(self, key: TreeKey) -> None:
+        if key not in self._rows or self._hover_key != key:
+            return
+        row, _ = self._rows[key]
+        pointer = row.winfo_containing(*row.winfo_pointerxy())
+        name = str(pointer) if pointer is not None else ""
+        if name.startswith(str(row)) or name.startswith(str(self.row_action)):
+            return
+        self._hover_key = None
+        self.row_action.place_forget()
+        self._paint_row(key)
+
+    def _on_row_click(self, key: TreeKey) -> str:
+        kind, item_id = key
+        if kind == "folder":
+            self._select(key)
+            self.toggle_folder(item_id)
+        else:
+            self.open_note(item_id)
+        return "break"
+
+    def _select(self, key: TreeKey | None) -> None:
+        previous, self.selection = self.selection, key
+        for item in (previous, key):
+            if item:
+                self._paint_row(item)
+
+    def toggle_folder(self, folder_id: int) -> None:
+        self.expanded_folders.symmetric_difference_update({folder_id})
+        self.refresh_tree()
+
+    def _delete_hovered(self) -> None:
+        key = self._hover_key
+        if key is None:
+            return
+        if key[0] == "note":
+            self.delete_note(key[1])
+        else:
+            self.delete_folder(key[1])
+
+    def _show_context_menu(self, event, key: TreeKey | None) -> str:
+        if not self.vault:
+            return "break"
+        if key is not None:
+            self._select(key)
+        else:
+            self._select(None)
+        menu = tk.Menu(self, tearoff=0, bg=resolve(Colors.card), fg=resolve(Colors.text),
+                       activebackground=resolve(Colors.selected), activeforeground=resolve(Colors.text),
+                       bd=0, relief="flat", font=Fonts.body)
+        if key is None or key[0] == "folder":
+            parent = key[1] if key else 0
+            menu.add_command(label="New note", command=lambda: self.new_note(parent))
+            menu.add_command(label="New folder", command=lambda: self.new_folder(parent))
+            if key:
+                expanded = key[1] in self.expanded_folders
+                menu.add_command(label="Collapse" if expanded else "Expand",
+                                 command=lambda: self.toggle_folder(key[1]))
+                menu.add_separator()
+                menu.add_command(label="Delete folder…", command=lambda: self.delete_folder(key[1]))
+        else:
+            menu.add_command(label="Open", command=lambda: self.open_note(key[1]))
+            menu.add_separator()
+            menu.add_command(label="Delete note…", command=lambda: self.delete_note(key[1]))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
+
+    # ---------------------------------------------------------------- search
+    def queue_search(self, _event=None) -> None:
+        if self._search_job:
+            self.after_cancel(self._search_job)
+        self._search_job = self.after(SEARCH_DELAY_MS, self._run_search)
+
+    def _run_search(self) -> None:
+        self._search_job = None
+        self.refresh_tree()
+
+    # ----------------------------------------------------------------- notes
+    def open_note(self, note_id: int) -> None:
+        if not self.vault:
+            return
         self.save()
-        note = next((item for item in self.vault.notes() if item.id == note_id), None)
+        self._reload()
+        note = self._note(note_id)
         if not note:
             return
         self.note_id = note.id
         self.folder_id = note.folder_id
+        self._saved_title = note.title
+        self.empty_state.grid_forget()
         self.title.delete(0, "end")
         self.title.insert(0, note.title)
         self.editor.delete("1.0", "end")
         self.editor.insert("1.0", note.content)
-        self.render_preview()
-        self.meta.configure(text=f"Markdown • updated {note.updated_at or 'now'}")
-        self.refresh_notes()
+        self.editor._textbox.edit_reset()
+        self.editor.mark_set("insert", "1.0")
+        self.editor.see("1.0")
+        self.render_markdown()
+        self.status.configure(text=f"Edited {note.updated_at}" if note.updated_at else "", text_color=Colors.text_faint)
+        self._update_breadcrumb()
+        previous_expanded = set(self.expanded_folders)
+        self._expand_to(note.folder_id)
+        self.selection = ("note", note.id)
+        if previous_expanded != self.expanded_folders or ("note", note.id) not in self._rows:
+            self.refresh_tree()
+        else:
+            self._repaint_rows()
         self.show_backlinks()
 
-    def new_note(self):
+    def _show_empty_state(self) -> None:
+        self.note_id = None
+        self.title.delete(0, "end")
+        self.editor.delete("1.0", "end")
+        self.breadcrumb.configure(text="")
+        self.status.configure(text="")
+        self.empty_state.grid(row=0, column=0, rowspan=3, sticky="nsew")
+        self.empty_state.lift()
+        self.show_backlinks()
+
+    def _update_breadcrumb(self) -> None:
+        parts = [self.vault.name if self.vault else "", *self._folder_path(self.folder_id)]
+        self.breadcrumb.configure(text="  /  ".join(part for part in parts if part))
+
+    def new_note(self, folder_id: int | None = None) -> None:
         if not self.vault:
             return
         self.save()
+        folder_id = self._target_folder() if folder_id is None else folder_id
         existing = {note.title.casefold() for note in self.vault.notes()}
         title, number = "Untitled", 1
         while title.casefold() in existing:
             number += 1
             title = f"Untitled {number}"
-        self.vault.create_note(title, folder_id=self.folder_id)
-        self.refresh_notes()
-        self.open_note(next(note.id for note in self.vault.notes() if note.title == title))
-        self.title.focus()
+        note_id = self.vault.create_note(title, folder_id=folder_id)
+        self._reload()
+        self._expand_to(folder_id)
+        self.refresh_tree()
+        self.open_note(note_id)
+        self.title.focus_set()
         self.title.select_range(0, "end")
 
-    def new_folder(self):
+    def delete_current_note(self) -> None:
+        if self.note_id:
+            self.delete_note(self.note_id)
+
+    def delete_note(self, note_id: int) -> None:
+        note = self._note(note_id)
+        if not note:
+            return
+        title = note.title or "Untitled"
+        confirm(self, "Delete note", f"“{title}” will be permanently deleted.", "Delete",
+                lambda: self._delete_note_now(note_id))
+
+    def _delete_note_now(self, note_id: int) -> None:
         if not self.vault:
             return
-        name = simpledialog.askstring("New folder", "Folder name:", parent=self)
-        if name and name.strip():
-            self.vault.create_folder(name.strip(), self.folder_id)
-            self.refresh_folders()
+        if note_id == self.note_id:
+            self._cancel_save()
+            self.note_id = None
+        self.vault.delete_note(note_id)
+        if self.selection == ("note", note_id):
+            self.selection = None
+        self._reload()
+        self.refresh_tree()
+        if self.note_id is None:
+            self._open_fallback_note()
+        self.status.configure(text="Note deleted", text_color=Colors.text_faint)
 
-    def delete_current_note(self):
-        if not self.note_id or not messagebox.askyesno("Delete note", "Delete this note permanently?", parent=self):
-            return
-        self.vault.delete_note(self.note_id)
-        self.note_id = None
-        self.refresh_notes()
-        self.title.delete(0, "end")
-        self.editor.delete("1.0", "end")
-        self.render_preview()
-        if self._notes:
-            self.open_note(self._notes[0].id)
+    def _open_fallback_note(self) -> None:
+        if self._all_notes:
+            self.open_note(self._all_notes[0].id)
         else:
-            self.new_note()
+            self._show_empty_state()
 
-    def show_settings(self):
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Settings")
-        dialog.geometry("430x390")
-        dialog.transient(self.winfo_toplevel())
-        dialog.grab_set()
-        ctk.CTkLabel(dialog, text="Settings", font=("Segoe UI", 22, "bold"), text_color=Colors.text).pack(anchor="w", padx=24, pady=(22, 8))
-        ctk.CTkLabel(dialog, text="Appearance", text_color=Colors.text_sub).pack(anchor="w", padx=24, pady=(12, 4))
-        theme = ctk.CTkOptionMenu(dialog, values=["Dark", "Light", "System"], command=lambda value: ctk.set_appearance_mode(value.lower()))
-        theme.set("Dark")
-        theme.pack(fill="x", padx=24)
-        ctk.CTkButton(dialog, text="Import Markdown note", command=self.import_markdown).pack(fill="x", padx=24, pady=(24, 8))
-        ctk.CTkButton(dialog, text="Delete current note", fg_color="#9E3D4C", hover_color="#7C2E3B", command=lambda: (dialog.destroy(), self.delete_current_note())).pack(fill="x", padx=24, pady=8)
-        ctk.CTkLabel(dialog, text="Vaults are encrypted. A forgotten master password cannot be reset or recovered. Keep a separate backup of your password. Without it, create a new vault and restore from a Markdown backup.", wraplength=370, justify="left", text_color=Colors.text_sub).pack(anchor="w", padx=24, pady=16)
+    # --------------------------------------------------------------- folders
+    def new_folder(self, parent_id: int | None = None) -> None:
+        """Create a folder through an in-app dialog with live duplicate checks."""
+        if not self.vault:
+            return
+        parent_id = self._target_folder() if parent_id is None else parent_id
+        location = " / ".join(self._folder_path(parent_id)) or self.vault.name
+        dialog = Dialog(self, "New folder")
+        dialog.heading("New folder", f"Inside {location}")
+        name = text_entry(dialog.body, "Folder name")
+        name.pack(fill="x", pady=(16, 0))
+        validation = ctk.CTkLabel(dialog.body, text="", font=Fonts.small, text_color=Colors.error, anchor="w",
+                                  height=18)
+        validation.pack(fill="x", pady=(4, 0))
+        row = dialog.actions()
+        create_button = primary_button(row, "Create", lambda: create(), width=96)
+        create_button.pack(side="right")
+        secondary_button(row, "Cancel", dialog.close, width=86).pack(side="right", padx=(0, 8))
 
-    def queue_save(self, _event=None):
+        def problem() -> str:
+            value = name.get().strip()
+            if not value:
+                return ""
+            if self.vault.folder_name_exists(value, parent_id):
+                return f"A folder named “{value}” already exists here."
+            return ""
+
+        def validate(_event=None) -> None:
+            message = problem()
+            validation.configure(text=message)
+            name.configure(border_color=Colors.error if message else Colors.border)
+            create_button.configure(state="disabled" if message or not name.get().strip() else "normal")
+
+        def create() -> None:
+            validate()
+            if create_button.cget("state") == "disabled":
+                return
+            try:
+                folder_id = self.vault.create_folder(name.get(), parent_id)
+            except DuplicateNameError as error:
+                validation.configure(text=str(error))
+                return
+            except ValueError as error:
+                validation.configure(text=str(error))
+                return
+            dialog.close()
+            self._reload()
+            self._expand_to(parent_id)
+            self.expanded_folders.add(folder_id)
+            self.selection = ("folder", folder_id)
+            self.refresh_tree()
+
+        name.bind("<KeyRelease>", validate)
+        name.bind("<Return>", lambda _e: create())
+        dialog.validate = validate
+        validate()
+        dialog.present()
+        dialog.after(60, name.focus_set)
+
+    def delete_folder(self, folder_id: int) -> None:
+        folder = self._folder(folder_id)
+        if not folder or not self.vault:
+            return
+        ids = set(self.vault.descendant_folder_ids(folder_id))
+        note_count = sum(1 for note in self._all_notes if note.folder_id in ids)
+        sub_count = len(ids) - 1
+        details = []
+        if note_count:
+            details.append(f"{note_count} note{'s' if note_count != 1 else ''}")
+        if sub_count:
+            details.append(f"{sub_count} sub-folder{'s' if sub_count != 1 else ''}")
+        contents = f" and {' and '.join(details)} inside it" if details else ""
+        confirm(self, "Delete folder", f"“{folder.name}”{contents} will be permanently deleted.", "Delete",
+                lambda: self._delete_folder_now(folder_id, ids))
+
+    def _delete_folder_now(self, folder_id: int, ids: set[int]) -> None:
+        if not self.vault:
+            return
+        open_note = self._note(self.note_id)
+        if open_note and open_note.folder_id in ids:
+            self._cancel_save()
+            self.note_id = None
+        self.vault.delete_folder(folder_id)
+        self.expanded_folders -= ids
+        if self.selection and self.selection[0] == "folder" and self.selection[1] in ids:
+            self.selection = None
+        self._reload()
+        self.refresh_tree()
+        if self.note_id is None:
+            self._open_fallback_note()
+        self.status.configure(text="Folder deleted", text_color=Colors.text_faint)
+
+    # ------------------------------------------------------------------ save
+    def queue_save(self, event=None) -> None:
+        if self.note_id is None or (event is not None and event.keysym in {"Control_L", "Control_R", "Shift_L",
+                                                                           "Shift_R", "Alt_L", "Alt_R"}):
+            return
         if self._save_job:
             self.after_cancel(self._save_job)
-        self._save_job = self.after(650, self.save)
+        self._save_job = self.after(AUTOSAVE_DELAY_MS, self.save)
+        self.status.configure(text="Editing…", text_color=Colors.text_faint)
 
-    def save(self, _event=None):
+    def _cancel_save(self) -> None:
         if self._save_job:
             self.after_cancel(self._save_job)
             self._save_job = None
-        if self.vault and self.note_id:
-            title = self.title.get().strip() or "Untitled"
-            self.vault.save_note(self.note_id, title, self.editor.get("1.0", "end-1c"), self.folder_id)
-            self.meta.configure(text="Saved • Markdown • local and encrypted")
+
+    def save(self, _event=None):
+        self._cancel_save()
+        if not (self.vault and self.note_id):
+            return "break"
+        title = self.title.get().strip() or "Untitled"
+        content = self.editor.get("1.0", "end-1c")
+        note = self._note(self.note_id)
+        if note and note.title == title and note.content == content:
+            return "break"
+        self.vault.save_note(self.note_id, title, content, self.folder_id)
+        self._reload()
+        duplicate = any(other.id != self.note_id and other.title.casefold() == title.casefold()
+                        for other in self._all_notes)
+        if duplicate:
+            self.status.configure(text="Another note has this title", text_color=Colors.error)
+        else:
+            self.status.configure(text="Saved", text_color=Colors.text_faint)
+        if title != self._saved_title:
+            self._saved_title = title
+            if ("note", self.note_id) in self._rows:
+                self._rows[("note", self.note_id)][1].configure(text=title)
+        self.show_backlinks()
         return "break"
 
-    def render_preview(self, _event=None):
+    # ------------------------------------------------------------- markdown
+    def render_markdown(self, _event=None) -> None:
+        widget = self.editor._textbox
+        for tag in ("md-heading1", "md-heading2", "md-heading3", "md-bold", "md-code", "md-link", "md-table"):
+            widget.tag_remove(tag, "1.0", "end")
         raw = self.editor.get("1.0", "end-1c")
-        self.preview.configure(state="normal")
-        self.preview.delete("1.0", "end")
-        for line in raw.splitlines():
-            heading = re.match(r"^(#{1,3})\s+(.*)$", line)
+        if raw.strip() or self.note_id is None:
+            self.empty_hint.place_forget()
+        else:
+            self.empty_hint.place(relx=0.5, rely=0.3, anchor="center")
+        for number, line in enumerate(raw.splitlines(), 1):
+            heading = re.match(r"^(#{1,3})\s+", line)
             if heading:
-                self.preview.insert("end", heading.group(2) + "\n", f"h{len(heading.group(1))}")
-                continue
-            if not line.strip():
-                self.preview.insert("end", "\n")
-                continue
-            cursor = 0
-            for match in re.finditer(r"\*\*(.+?)\*\*|`([^`]+)`", line):
-                self.preview.insert("end", line[cursor:match.start()])
-                text = match.group(1) or match.group(2)
-                self.preview.insert("end", text, "bold" if match.group(1) else "code")
-                cursor = match.end()
-            self.preview.insert("end", line[cursor:] + "\n")
-        if not raw:
-            self.preview.insert("end", "Your note preview appears here as you type.", "muted")
-        self.preview.configure(state="disabled")
+                widget.tag_add(f"md-heading{len(heading.group(1))}", f"{number}.0", f"{number}.end")
+            if line.count("|") >= 2:
+                widget.tag_add("md-table", f"{number}.0", f"{number}.end")
+            for match in INLINE_PATTERN.finditer(line):
+                start, end = f"{number}.{match.start()}", f"{number}.{match.end()}"
+                tag = "md-bold" if match.group(1) else "md-code" if match.group(2) else "md-link"
+                widget.tag_add(tag, start, end)
 
-    def show_backlinks(self):
-        self.side_title.configure(text="BACKLINKS")
+    def _apply_editor_theme(self) -> None:
+        """Re-resolve plain-Tk colours that CustomTkinter does not manage."""
+        widget = self.editor._textbox
+        family = self._editor_family
+        widget.configure(selectbackground=resolve(Colors.selection), selectforeground=resolve(Colors.text),
+                         inactiveselectbackground=resolve(Colors.active), insertbackground=resolve(Colors.text))
+        widget.tag_configure("md-heading1", font=(family, 24, "bold"), spacing1=10, spacing3=6)
+        widget.tag_configure("md-heading2", font=(family, 20, "bold"), spacing1=8, spacing3=4)
+        widget.tag_configure("md-heading3", font=(family, 17, "bold"), spacing1=6, spacing3=2)
+        widget.tag_configure("md-bold", font=(family, 15, "bold"))
+        widget.tag_configure("md-code", font=(MONO_FAMILY, 13), foreground=resolve(Colors.code))
+        widget.tag_configure("md-link", foreground=resolve(Colors.primary), underline=True)
+        widget.tag_configure("md-table", font=(MONO_FAMILY, 13), background=resolve(Colors.sidebar))
+        self.render_markdown()
+
+    def open_wiki_link(self, event):
+        """Open the vault note targeted by a clicked wiki link."""
+        widget = self.editor._textbox
+        line_number, column = map(int, widget.index(f"@{event.x},{event.y}").split("."))
+        line = widget.get(f"{line_number}.0", f"{line_number}.end")
+        for match in WIKI_LINK_PATTERN.finditer(line):
+            if match.start() <= column < match.end():
+                target = match.group(1).strip().casefold()
+                note = next((item for item in self._all_notes if item.title.casefold() == target), None)
+                if note:
+                    self.open_note(note.id)
+                else:
+                    self.status.configure(text=f"No note named “{match.group(1).strip()}”",
+                                          text_color=Colors.text_faint)
+                return "break"
+        return None
+
+    def show_backlinks(self) -> None:
         for child in self.side.winfo_children():
             child.destroy()
         if not self.vault or not self.note_id:
             return
         title = self.title.get().strip()
-        links = self.vault.backlinks(title)
+        wanted = title.casefold()
+        links = [note for note in self._all_notes
+                 if note.id != self.note_id and wanted in {link.casefold() for link in Vault.links(note.content)}]
         if not links:
-            empty = ctk.CTkFrame(self.side, fg_color=Colors.input_bg, corner_radius=8)
-            empty.pack(fill="x", padx=8, pady=8)
-            ctk.CTkLabel(empty, text="No backlinks", text_color=Colors.text, font=Fonts.body_bold).pack(anchor="w", padx=12, pady=(12, 4))
-            ctk.CTkLabel(empty, text="Link another note with [[Note title]].", justify="left", wraplength=185, text_color=Colors.text_sub, font=Fonts.body).pack(anchor="w", padx=12, pady=(0, 12))
+            ctk.CTkLabel(self.side, text="No other notes link here yet.", font=Fonts.small,
+                         text_color=Colors.text_sub, anchor="w", justify="left", wraplength=190).pack(
+                fill="x", padx=12, pady=(0, 4))
+            ctk.CTkLabel(self.side, text=f"Use [[{title or 'Note title'}]] in another note.", font=Fonts.small,
+                         text_color=Colors.text_faint, anchor="w", justify="left", wraplength=190).pack(
+                fill="x", padx=12)
             return
         for note in links:
-            ctk.CTkButton(self.side, text=note.title, anchor="w", fg_color="transparent", text_color=Colors.primary, command=lambda note_id=note.id: self.open_note(note_id)).pack(fill="x", pady=2)
+            button = ctk.CTkButton(self.side, text=note.title, image=icon_image("note", 14), compound="left",
+                                   anchor="w", height=28, corner_radius=Metrics.radius - 2, font=Fonts.body,
+                                   fg_color="transparent", hover_color=Colors.hover, text_color=Colors.text,
+                                   command=lambda note_id=note.id: self.open_note(note_id))
+            button.pack(fill="x", padx=(6, 8), pady=1)
 
-    def show_graph(self):
-        self.save()
-        notes, edges = self.vault.graph()
-        window = ctk.CTkToplevel(self)
-        window.title("Vault graph")
-        window.geometry("1000x720")
-        window.minsize(650, 480)
-        window.grid_rowconfigure(1, weight=1)
-        window.grid_columnconfigure(0, weight=1)
-        header = ctk.CTkFrame(window, fg_color=Colors.card, corner_radius=0)
-        header.grid(row=0, column=0, sticky="ew")
-        ctk.CTkLabel(header, text="Vault graph", font=("Segoe UI", 18, "bold"), text_color=Colors.text).pack(side="left", padx=18, pady=12)
-        ctk.CTkLabel(header, text="Scroll to zoom · drag to pan · click a note to open", text_color=Colors.text_sub).pack(side="left", padx=12)
-        canvas = tk.Canvas(window, bg="#141B27", highlightthickness=0)
-        canvas.grid(row=1, column=0, sticky="nsew")
-        if not notes:
-            canvas.create_text(400, 280, text="Create notes and link them with [[wiki links]]", fill="#A8B3C5", font=("Segoe UI", 16))
+    # ------------------------------------------------------ panel & theming
+    def toggle_context_panel(self) -> None:
+        self._auto_collapsed = False
+        self._set_context_visible(not self._context_visible)
+
+    def _set_context_visible(self, visible: bool) -> None:
+        self._context_visible = visible
+        if visible:
+            self.context_divider.grid()
+            self.context_panel.grid()
+        else:
+            self.context_divider.grid_remove()
+            self.context_panel.grid_remove()
+
+    def _on_resize(self, _event=None) -> None:
+        logical = self.winfo_width() / ctk.ScalingTracker.get_widget_scaling(self)
+        if logical <= 1:  # not mapped yet
             return
-        center_x, center_y, radius = 500, 350, max(100, min(300, 24 * len(notes)))
-        positions = {}
-        for index, note in enumerate(notes):
-            angle = (2 * math.pi * index / len(notes)) - math.pi / 2
-            positions[note.id] = (center_x + radius * math.cos(angle), center_y + radius * math.sin(angle))
-        for source, target in edges:
-            canvas.create_line(*positions[source], *positions[target], fill="#46556A", width=1.5)
-        for note in notes:
-            x, y = positions[note.id]
-            tag = f"note-{note.id}"
-            size = min(16, 9 + sum(note.id in edge for edge in edges))
-            canvas.create_oval(x-size, y-size, x+size, y+size, fill="#80CDB2", outline="#C2F0DE", width=2, tags=(tag,))
-            canvas.create_text(x, y+size+15, text=note.title, fill="#E4EAF2", font=("Segoe UI", 10), tags=(tag,))
-            canvas.tag_bind(tag, "<Enter>", lambda _event, item=tag: canvas.itemconfigure(item, fill="#B8F2D7"))
-            canvas.tag_bind(tag, "<Leave>", lambda _event, item=tag: canvas.itemconfigure(item, fill="#80CDB2"))
-            canvas.tag_bind(tag, "<Button-1>", lambda _event, note_id=note.id: (window.destroy(), self.open_note(note_id)))
-        canvas.bind("<MouseWheel>", lambda event: canvas.scale("all", event.x, event.y, 1.1 if event.delta > 0 else 0.9, 1.1 if event.delta > 0 else 0.9))
-        canvas.bind("<ButtonPress-2>", lambda event: canvas.scan_mark(event.x, event.y))
-        canvas.bind("<B2-Motion>", lambda event: canvas.scan_dragto(event.x, event.y, gain=1))
-        ctk.CTkButton(header, text="−", width=34, command=lambda: canvas.scale("all", 500, 350, .9, .9)).pack(side="right", padx=(4, 12))
-        ctk.CTkButton(header, text="+", width=34, command=lambda: canvas.scale("all", 500, 350, 1.1, 1.1)).pack(side="right", padx=4)
+        if logical < NARROW_WIDTH and self._context_visible:
+            self._auto_collapsed = True
+            self._set_context_visible(False)
+        elif logical >= NARROW_WIDTH and self._auto_collapsed:
+            self._auto_collapsed = False
+            self._set_context_visible(True)
 
-    def import_markdown(self):
-        path = filedialog.askopenfilename(filetypes=[("Markdown", "*.md *.markdown"), ("Text", "*.txt")])
-        if not path:
+    def toggle_theme(self) -> None:
+        self.change_theme("Light" if ctk.get_appearance_mode() == "Dark" else "Dark")
+
+    def change_theme(self, value: str) -> None:
+        ctk.set_appearance_mode(value.lower())
+        cf.set_preference("theme", value.lower())
+        self.after(20, self._apply_editor_theme)
+
+    def change_editor_font(self, family: str) -> None:
+        self._editor_family = family
+        self.editor.configure(font=(family, 15))
+        cf.set_preference("editor_font", family)
+        self._apply_editor_theme()
+
+    # -------------------------------------------------------------- settings
+    def show_settings(self) -> None:
+        if not self.vault:
+            return
+        if self.settings_dialog is not None and self.settings_dialog.winfo_exists():
+            self.settings_dialog.reveal()
+            return
+        dialog = Dialog(self, "Settings", width=380)
+        self.settings_dialog = dialog
+        dialog.heading("Settings")
+
+        def section(text: str) -> None:
+            ctk.CTkLabel(dialog.body, text=text, font=Fonts.section, text_color=Colors.text_faint,
+                         anchor="w").pack(fill="x", pady=(18, 6))
+
+        section("APPEARANCE")
+        field_label(dialog.body, "Theme").pack(fill="x", pady=(0, 4))
+        theme = ctk.CTkSegmentedButton(
+            dialog.body, values=["Light", "Dark", "System"], command=self.change_theme, height=32,
+            corner_radius=Metrics.radius, font=Fonts.body, fg_color=Colors.sidebar,
+            selected_color=Colors.primary, selected_hover_color=Colors.primary_hover,
+            unselected_color=Colors.sidebar, unselected_hover_color=Colors.hover, text_color=Colors.text,
+        )
+        saved_theme = cf.get_preference("theme", ctk.get_appearance_mode().lower()).capitalize()
+        theme.set(saved_theme if saved_theme in {"Light", "Dark", "System"} else ctk.get_appearance_mode())
+        theme.pack(fill="x")
+        field_label(dialog.body, "Editor font").pack(fill="x", pady=(12, 4))
+        font = ctk.CTkOptionMenu(
+            dialog.body, values=list(EDITOR_FONTS), command=self.change_editor_font, height=32,
+            corner_radius=Metrics.radius, font=Fonts.body, dropdown_font=Fonts.body, fg_color=Colors.input_bg,
+            button_color=Colors.input_bg, button_hover_color=Colors.hover, text_color=Colors.text,
+            dropdown_fg_color=Colors.card, dropdown_hover_color=Colors.hover, dropdown_text_color=Colors.text,
+        )
+        font.set(self._editor_family)
+        font.pack(fill="x")
+
+        section("IMPORT")
+        for label, action in (("Import Markdown file…", self.import_markdown),
+                              ("Import folder of notes…", self.import_directory),
+                              ("Merge another vault…", self.import_database)):
+            button = secondary_button(dialog.body, label, action, image=icon_image("import", 15), compound="left",
+                                      anchor="w")
+            button.pack(fill="x", pady=3)
+
+        row = dialog.actions()
+        primary_button(row, "Done", dialog.close, width=96).pack(side="right")
+        dialog.present()
+
+    # ---------------------------------------------------------------- import
+    def import_markdown(self) -> None:
+        path = filedialog.askopenfilename(parent=self.winfo_toplevel(),
+                                          filetypes=[("Markdown", "*.md *.markdown"), ("Text", "*.txt")])
+        if not path or not self.vault:
             return
         try:
             source = Path(path)
-            self.vault.create_note(source.stem, source.read_text(encoding="utf-8"), self.folder_id)
-            self.refresh_notes()
-        except (OSError, UnicodeError) as error:
-            messagebox.showerror("Import Markdown", str(error))
+            note_id = self.vault.create_note(source.stem, source.read_text(encoding="utf-8"), self._target_folder())
+        except (OSError, UnicodeError):
+            self.status.configure(text="That file could not be read as UTF-8 text.", text_color=Colors.error)
+            return
+        self._reload()
+        self.refresh_tree()
+        self.open_note(note_id)
 
+    def import_directory(self) -> None:
+        """Import Markdown and text files while preserving directory hierarchy."""
+        location = filedialog.askdirectory(parent=self.winfo_toplevel(), title="Import a folder of notes")
+        if not location or not self.vault:
+            return
+        root = Path(location)
+        sources = sorted(path for path in root.rglob("*")
+                         if path.is_file() and path.suffix.lower() in {".md", ".markdown", ".txt"})
+        if not sources:
+            self.status.configure(text="No Markdown or text files in that folder.", text_color=Colors.text_faint)
+            return
+        base = self._target_folder()
+        folders = {(folder.parent_id, folder.name.casefold()): folder.id for folder in self.vault.folders()}
+        imported = failed = 0
+        for source in sources:
+            folder_id = base
+            for segment in source.relative_to(root).parent.parts:
+                key = (folder_id, segment.casefold())
+                if key not in folders:
+                    folders[key] = self.vault.create_folder(segment, folder_id)
+                folder_id = folders[key]
+            try:
+                self.vault.create_note(source.stem, source.read_text(encoding="utf-8"), folder_id)
+                imported += 1
+            except (OSError, UnicodeError):
+                failed += 1
+        self._reload()
+        self._expand_to(base)
+        self.refresh_tree()
+        message = f"Imported {imported} note{'s' if imported != 1 else ''}"
+        if failed:
+            message += f", {failed} skipped"
+        self.status.configure(text=message, text_color=Colors.text_faint)
+
+    def import_database(self) -> None:
+        """Ask for a compatible, encrypted vault and merge it into this vault."""
+        path = filedialog.askopenfilename(parent=self.winfo_toplevel(), title="Choose a Secure Notes database",
+                                          filetypes=[("Secure Notes database", "*.db")])
+        if not path or not self.vault:
+            return
+        dialog = Dialog(self, "Merge vault")
+        dialog.heading("Merge another vault", f"{Path(path).name} is opened read-only and is not changed.")
+        password = ctk.CTkEntry(dialog.body, placeholder_text="Source vault password", show="●",
+                                height=Metrics.control_height, corner_radius=Metrics.radius,
+                                border_color=Colors.border, fg_color=Colors.input_bg, text_color=Colors.text,
+                                font=Fonts.body)
+        password.pack(fill="x", pady=(16, 4))
+        status = ctk.CTkLabel(dialog.body, text="", font=Fonts.small, text_color=Colors.error, anchor="w")
+        status.pack(fill="x")
+
+        def merge() -> None:
+            if not password.get():
+                status.configure(text="Enter the source vault password.")
+                return
+            try:
+                imported, skipped = self.vault.merge_database(Path(path), password.get())
+            except (OSError, ValueError) as error:
+                status.configure(text=str(error))
+                password.delete(0, "end")
+                return
+            password.delete(0, "end")
+            dialog.close()
+            self._reload()
+            self.refresh_tree()
+            self.status.configure(text=f"Merged {imported} note{'s' if imported != 1 else ''}, "
+                                       f"skipped {skipped}", text_color=Colors.text_faint)
+
+        row = dialog.actions()
+        primary_button(row, "Merge", merge, width=96).pack(side="right")
+        secondary_button(row, "Cancel", dialog.close, width=86).pack(side="right", padx=(0, 8))
+        password.bind("<Return>", lambda _e: merge())
+        dialog.present()
+        dialog.after(60, password.focus_set)

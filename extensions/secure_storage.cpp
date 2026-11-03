@@ -139,6 +139,43 @@ public:
         }
     }
 
+    bool connect_readonly(const string &password, const string &name)
+    {
+        char separator = '/';
+#ifdef _WIN32
+        separator = '\\';
+#endif
+        string full_path = db_path;
+        if (!full_path.empty() && full_path.back() != separator)
+        {
+            full_path += separator;
+        }
+        full_path += name + ".db";
+
+        rc = sqlite3_open_v2(full_path.c_str(), &db, SQLITE_OPEN_READONLY, nullptr);
+        if (rc != SQLITE_OK)
+        {
+            close();
+            return false;
+        }
+        rc = sqlite3_key(db, password.c_str(), static_cast<int>(password.size()));
+        if (rc != SQLITE_OK)
+        {
+            close();
+            return false;
+        }
+        char *errMsg = nullptr;
+        rc = sqlite3_exec(db, "SELECT count(*) FROM sqlite_master;", nullptr, nullptr, &errMsg);
+        if (rc != SQLITE_OK)
+        {
+            if (errMsg)
+                sqlite3_free(errMsg);
+            close();
+            return false;
+        }
+        return true;
+    }
+
     string get_current_timestamp()
     {
         time_t now = time(0);
@@ -384,6 +421,7 @@ PYBIND11_MODULE(secure_storage, m)
     py::class_<DbOperations>(m, "DbOperations")
         .def(py::init<const string &>())
         .def("connect", &DbOperations::connect)
+        .def("connect_readonly", &DbOperations::connect_readonly)
         .def("close", &DbOperations::close)
         .def("add_note", &DbOperations::add_note,
              py::arg("title"), py::arg("content"), py::arg("is_md"), py::arg("folder_id") = 0)

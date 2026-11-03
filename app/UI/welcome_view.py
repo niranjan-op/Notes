@@ -1,132 +1,131 @@
+"""Vault picker: open, create or delete local vaults."""
+
 import customtkinter as ctk
-from .styles import Colors, Fonts
+
 import app.core.config as cf
+from .brand import APP_NAME, APP_VERSION, icon_image, logo_image
+from .components import Tooltip, confirm, icon_button, primary_button
+from .styles import Colors, Fonts, Metrics
+
+
 class WelcomeView(ctk.CTkFrame):
     def __init__(self, parent, controller):
-        super().__init__(parent, fg_color=Colors.bg)
+        super().__init__(parent, fg_color=Colors.bg, corner_radius=0)
         self.controller = controller
-        self.setup_ui()
+        self._build()
 
-    def setup_ui(self):
-        # --- Centered Card ---
-        self.card = ctk.CTkFrame(
-            self, 
-            fg_color=Colors.card,
-            corner_radius=15,
-            border_width=1,
-            border_color=Colors.border,
-            width=400,
-            height=400 # slightly smaller than setup/login since fewer fields
-        )
-        self.card.pack_propagate(False)
-        self.card.place(relx=0.5, rely=0.5, anchor="center")
+    def _build(self) -> None:
+        theme = icon_button(self, "theme", self._toggle_theme, "Toggle light / dark")
+        theme.place(relx=1, x=-16, y=14, anchor="ne")
 
-        # --- Content Container ---
-        content = ctk.CTkFrame(self.card, fg_color="transparent")
-        content.pack(fill="both", expand=True, padx=40, pady=40)
+        column = ctk.CTkFrame(self, fg_color="transparent", width=380)
+        column.place(relx=0.5, rely=0.45, anchor="center")
 
-        # --- App Icon/Logo Placeholder (Optional) ---
-        # ctk.CTkLabel(content, text="🔒", font=("Segoe UI", 48)).pack(pady=(10, 20))
-
-        # --- Headers ---
+        self.logo = logo_image(52)
+        ctk.CTkLabel(column, text="", image=self.logo).pack(pady=(0, 14))
+        ctk.CTkLabel(column, text=APP_NAME, font=Fonts.display, text_color=Colors.text).pack()
         ctk.CTkLabel(
-            content, 
-            text="Secure Vault", 
-            font=Fonts.header, 
-            text_color=Colors.text
-        ).pack(pady=(0, 10))
+            column, text="Encrypted, local-first notes.", font=Fonts.body, text_color=Colors.text_sub,
+        ).pack(pady=(4, 26))
 
-        ctk.CTkLabel(
-            content, 
-            text="Your personal secure notes manager.\nEncrypted and local.", 
-            font=Fonts.body, 
-            text_color=Colors.text_sub,
-            justify="center"
-        ).pack(pady=(0, 40))
+        header = ctk.CTkFrame(column, fg_color="transparent")
+        header.pack(fill="x", pady=(0, 6))
+        ctk.CTkLabel(header, text="VAULTS", font=Fonts.section, text_color=Colors.text_faint).pack(side="left")
 
-        # --- Buttons ---
-        
-        # 1. Create New Vault
-        self.create_btn = ctk.CTkButton(
-            content, 
-            text="Create New Vault", 
-            height=45, 
-            font=("Segoe UI", 13, "bold"),
-            fg_color=Colors.primary, 
-            hover_color=Colors.primary_hover,
-            corner_radius=8,
-            command=lambda: self.controller.show_frame("SetupView")
+        self.vault_list = ctk.CTkFrame(
+            column, fg_color=Colors.sidebar, border_width=1, border_color=Colors.border,
+            corner_radius=Metrics.radius_lg, width=380,
         )
-        self.create_btn.pack(fill="x", pady=(0, 20))
+        self.vault_list.pack(fill="x")
 
-        # --- Vault List Container ---
-        self.vault_container = ctk.CTkFrame(content, fg_color="transparent")
-        self.vault_container.pack(fill="x", pady=(0, 10))
-        
-        # Initial load
+        primary_button(column, "Create new vault", lambda: self.controller.show_frame("SetupView"),
+                       width=380, height=38).pack(fill="x", pady=(16, 0))
+
+        self.status = ctk.CTkLabel(column, text="", font=Fonts.small, text_color=Colors.error, wraplength=360)
+        self.status.pack(pady=(10, 0))
+
+        ctk.CTkLabel(self, text=f"v{APP_VERSION}", font=Fonts.small, text_color=Colors.text_faint).place(
+            relx=0.5, rely=1, y=-14, anchor="s")
+
+    def update_view(self, context=None) -> None:
+        self.status.configure(text="")
         self.refresh_vault_list()
 
-        # --- Version/Footer (Moved here so it can access 'content') ---
-        ctk.CTkLabel(
-            content,
-            text="v1.0.0",
-            font=("Segoe UI", 10),
-            text_color=Colors.text_sub
-        ).pack(side="bottom", pady=(20, 0))
-
-    def update_view(self, context=None):
-        """Called by controller when switching to this view"""
-        self.refresh_vault_list()
-    
-    def open_selected_vault(self):
-        if hasattr(self, 'vault_select'):
-            vault_name = self.vault_select.get()
-            if vault_name:
-                self.controller.show_frame("LoginView", context={"vault_name": vault_name})
-
-    def refresh_vault_list(self):
-        # Clear existing widgets in the container
-        for widget in self.vault_container.winfo_children():
+    def refresh_vault_list(self) -> None:
+        for widget in self.vault_list.winfo_children():
             widget.destroy()
+        vaults, last_open = cf.read_config() if cf.search_config() else ([], "")
+        if not vaults:
+            ctk.CTkLabel(
+                self.vault_list, text="No vaults yet. Create one to get started.",
+                font=Fonts.body, text_color=Colors.text_sub,
+            ).pack(padx=16, pady=18)
+            return
+        ordered = sorted(vaults, key=lambda name: (name != last_open, name.casefold()))
+        for index, name in enumerate(ordered):
+            if index:
+                ctk.CTkFrame(self.vault_list, height=1, fg_color=Colors.border).pack(fill="x", padx=12)
+            self._vault_row(name, name == last_open)
 
-        if cf.search_config():
-            vaults, _ = cf.read_config()
-            vault_values = list(vaults) if vaults else []
-            if vault_values:
-                ctk.CTkLabel(
-                    self.vault_container,
-                    text="Open Existing Vault",
-                    font=Fonts.body_bold,
-                    text_color=Colors.text,
-                    anchor="w"
-                ).pack(fill="x", pady=(0, 5))
+    def _vault_row(self, name: str, is_last: bool) -> None:
+        row = ctk.CTkFrame(self.vault_list, fg_color="transparent", corner_radius=Metrics.radius, height=46)
+        row.pack(fill="x", padx=4, pady=3)
+        row.pack_propagate(False)
+        icon = ctk.CTkLabel(row, text="", image=icon_image("lock", 17), width=28)
+        icon.pack(side="left", padx=(10, 6))
+        label = ctk.CTkLabel(row, text=name, font=Fonts.body_bold, text_color=Colors.text, anchor="w")
+        label.pack(side="left")
+        if is_last:
+            ctk.CTkLabel(row, text="Last opened", font=Fonts.small, text_color=Colors.text_faint).pack(
+                side="left", padx=(10, 0))
+        delete = icon_button(row, "trash", lambda: self._confirm_delete(name), "Delete vault", size=30, icon_size=16)
+        delete.pack(side="right", padx=8)
+        delete.pack_forget()
 
-                self.vault_select = ctk.CTkComboBox(
-                    self.vault_container,
-                    values=vault_values,
-                    height=40,
-                    font=Fonts.body,
-                    dropdown_font=Fonts.body,
-                    fg_color=Colors.input_bg,
-                    border_color=Colors.border,
-                    text_color=Colors.text,
-                    button_color=Colors.primary,
-                    button_hover_color=Colors.primary_hover
-                )
-                self.vault_select.set(vault_values[-1]) # Default to most recent
-                self.vault_select.pack(fill="x", pady=(0, 10))
+        def enter(_event=None):
+            row.configure(fg_color=Colors.hover)
+            delete.pack(side="right", padx=8)
 
-                self.open_btn = ctk.CTkButton(
-                    self.vault_container, 
-                    text="Open Selected", 
-                    height=40, 
-                    font=("Segoe UI", 13, "bold"),
-                    fg_color="transparent", 
-                    border_width=2,
-                    border_color=Colors.primary,
-                    text_color=Colors.primary, 
-                    hover_color=Colors.input_bg, 
-                    corner_radius=8,
-                    command=self.open_selected_vault
-                )
-                self.open_btn.pack(fill="x")
+        def leave(_event=None):
+            pointer = row.winfo_containing(*row.winfo_pointerxy())
+            if pointer is None or not str(pointer).startswith(str(row)):
+                row.configure(fg_color="transparent")
+                delete.pack_forget()
+
+        open_vault = lambda _event=None: self.controller.show_frame("LoginView", context={"vault_name": name})
+        for widget in (row, icon, label):
+            widget.bind("<Enter>", enter)
+            widget.bind("<Leave>", leave)
+            widget.bind("<Button-1>", open_vault)
+            widget.configure(cursor="hand2")
+        delete.bind("<Leave>", leave, add="+")
+        Tooltip(label, "Open vault")
+
+    def _confirm_delete(self, name: str) -> None:
+        confirm(
+            self,
+            "Delete vault",
+            f"This permanently erases “{name}” and every note inside it. "
+            "Encrypted data cannot be recovered.",
+            "Delete vault",
+            lambda: self._delete(name),
+            require_text=name,
+        )
+
+    def _delete(self, name: str) -> None:
+        try:
+            cf.delete_vault(name)
+        except ValueError:
+            self.status.configure(text="That vault name is invalid and was not deleted.")
+            return
+        except OSError:
+            self.status.configure(text="The vault files are in use and could not be deleted. Close other "
+                                       "copies of Secure Notes and try again.")
+            return
+        self.status.configure(text="")
+        self.refresh_vault_list()
+
+    def _toggle_theme(self) -> None:
+        mode = "light" if ctk.get_appearance_mode() == "Dark" else "dark"
+        ctk.set_appearance_mode(mode)
+        cf.set_preference("theme", mode)

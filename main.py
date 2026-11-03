@@ -1,68 +1,81 @@
+import ctypes
+import sys
+
 import customtkinter as ctk
-import tkinter as tk
-from app.UI.setup_view import SetupView
-from app.UI.login_view import LoginView
-from app.UI.welcome_view import WelcomeView
-from app.UI.main_view import MainView
+
 import app.core.config as cf
+from app.UI.brand import APP_NAME, APP_USER_MODEL_ID
+from app.UI.components import set_window_icon
+from app.UI.login_view import LoginView
+from app.UI.main_view import MainView
+from app.UI.setup_view import SetupView
+from app.UI.styles import Colors
+from app.UI.welcome_view import WelcomeView
+
+
+def _register_windows_app_id() -> None:
+    """Give the process its own taskbar identity so Windows shows our icon, not Python's."""
+    if sys.platform.startswith("win"):
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+        except (AttributeError, OSError):
+            pass
+
 
 class MainApp(ctk.CTk):
     def __init__(self):
-        super().__init__()
-        self.title("Secure Notes")
-        self._icon = self._app_icon()
-        self.iconphoto(True, self._icon)
-        self.geometry("1280x760")
-        self.minsize(980, 620)
-        
-        self.container = ctk.CTkFrame(self)
+        super().__init__(fg_color=Colors.bg)
+        self.title(APP_NAME)
+        # Calling iconbitmap also stops CustomTkinter replacing the icon with its own.
+        set_window_icon(self)
+        self._fit_to_screen()
+
+        self.container = ctk.CTkFrame(self, fg_color=Colors.bg, corner_radius=0)
         self.container.pack(fill="both", expand=True)
-        
-        # 1. Configure Grid Layout (Move this out so it applies to ALL views)
         self.container.grid_rowconfigure(0, weight=1)
         self.container.grid_columnconfigure(0, weight=1)
-        
+
         self.frames = {}
-        
-        # 2. Initialize ALL views (Loop approach)
-        # We load both now so you can seamlessly switch between them later
-        # Note: We use login_view.LoginView because of your import style
-        for F in (WelcomeView, SetupView, LoginView, MainView):
-            page_name = F.__name__
-            frame = F(parent=self.container, controller=self)
-            self.frames[page_name] = frame
-            
-            # Stack them on top of each other
+        for view in (WelcomeView, SetupView, LoginView, MainView):
+            frame = view(parent=self.container, controller=self)
+            self.frames[view.__name__] = frame
             frame.grid(row=0, column=0, sticky="nsew")
 
-        # 3. Check Config and Select Startup Screen
-        # Always show WelcomeView first as per new design
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.show_frame("WelcomeView")
 
-    @staticmethod
-    def _app_icon():
-        image = tk.PhotoImage(width=32, height=32)
-        image.put("#4f46e5", to=(0, 0, 32, 32))
-        image.put("#ffffff", to=(8, 5, 24, 27))
-        image.put("#80cdb2", to=(11, 11, 21, 13))
-        image.put("#80cdb2", to=(11, 16, 21, 18))
-        image.put("#80cdb2", to=(11, 21, 19, 23))
-        return image
-    
+    def _fit_to_screen(self) -> None:
+        """Open at a comfortable size for the current monitor and DPI scaling."""
+        scaling = ctk.ScalingTracker.get_window_scaling(self)
+        screen_w = self.winfo_screenwidth() / scaling
+        screen_h = self.winfo_screenheight() / scaling
+        width = int(min(1320, max(960, screen_w * 0.78)))
+        height = int(min(840, max(600, screen_h * 0.8)))
+        width, height = int(min(width, screen_w - 40)), int(min(height, screen_h - 80))
+        x = int((screen_w - width) / 2 * scaling)
+        y = int((screen_h - height) / 3 * scaling)
+        self.geometry(f"{width}x{height}+{max(0, x)}+{max(0, y)}")
+        self.minsize(min(940, width), min(580, height))
+
     def show_frame(self, page_name, context=None):
         frame = self.frames[page_name]
-        
-        # Refresh the view if it supports it
         if hasattr(frame, "update_view"):
-            try:
-                frame.update_view(context)
-            except TypeError:
-                # Handle cases where update_view doesn't accept arguments (like in old views)
-                frame.update_view()
-            
+            frame.update_view(context)
         frame.tkraise()
 
+    def on_close(self) -> None:
+        """Flush pending edits and close the vault before exiting."""
+        self.frames["MainView"].lock(navigate=False)
+        self.destroy()
+
+
+def _initial_theme() -> str:
+    theme = cf.get_preference("theme", "dark").lower()
+    return theme if theme in {"dark", "light", "system"} else "dark"
+
+
 if __name__ == "__main__":
-    ctk.set_appearance_mode("dark")
+    _register_windows_app_id()
+    ctk.set_appearance_mode(_initial_theme())
     app = MainApp()
     app.mainloop()

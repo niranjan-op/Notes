@@ -1,5 +1,6 @@
 import configparser
 import os
+import shutil
 import time
 from pathlib import Path
 
@@ -14,9 +15,21 @@ except ImportError:
         print(f"Failed to load secure_storage: {e}")
         ss = None
 
+import sys
+
 CONFIG_FILE = "config.ini"
 APP_NAME = "Secure Notes"
-base_path = os.getenv('LOCALAPPDATA') or str(Path.home() / "AppData" / "Local")
+
+
+def _default_base_path() -> str:
+    if os.name == "nt":
+        return os.getenv("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    if sys.platform == "darwin":
+        return str(Path.home() / "Library" / "Application Support")
+    return os.getenv("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+
+
+base_path = _default_base_path()
 
 def vault_path(name: str) -> Path:
     """Return the private on-device directory for one vault."""
@@ -121,6 +134,67 @@ def update_config(vault_name: str):
     print(f"Vaults:{vaults}")
     print(f"last_open_vault:{vault_name}")
     return True
+
+_INVALID_NAME_CHARS = set('<>:"/\\|?*')
+_RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+
+
+def validate_vault_name(name: str) -> str | None:
+    """Return a user-facing problem with a vault name, or None when it is usable."""
+    if not name:
+        return "Enter a vault name."
+    if len(name) > 64:
+        return "Use 64 characters or fewer."
+    if any(char in _INVALID_NAME_CHARS or ord(char) < 32 for char in name):
+        return 'Vault names cannot contain < > : " / \\ | ? *'
+    if name.endswith((".", " ")) or name.split(".")[0].upper() in _RESERVED_NAMES:
+        return "That name is reserved by Windows."
+    return None
+
+
+def delete_vault(name: str) -> None:
+    """Permanently remove a vault's encrypted files and its config entry.
+
+    Files are removed first so a failure (for example a locked database) leaves
+    the vault listed and recoverable. Raises ValueError for unsafe names and
+    OSError when the files cannot be removed.
+    """
+    root = (Path(base_path) / APP_NAME).resolve()
+    target = vault_path(name).resolve()
+    if validate_vault_name(name) or target.parent != root:
+        raise ValueError("Invalid vault name.")
+    if target.exists():
+        shutil.rmtree(target)
+
+    config_path = ensure_config()
+    config = configparser.ConfigParser()
+    config.read(config_path)
+    vaults = [v for v in config.get('vaults', 'items', fallback='').split(',') if v and v != name]
+    last_open = config.get('last_open_vault', 'value', fallback='')
+    config['vaults'] = {'items': ','.join(vaults)}
+    config['last_open_vault'] = {'value': last_open if last_open != name else (vaults[-1] if vaults else '')}
+    with open(config_path, "w") as f:
+        config.write(f)
+
+
+def get_preference(key: str, default: str = "") -> str:
+    """Read a non-sensitive UI preference from the central config."""
+    config = configparser.ConfigParser()
+    config.read(ensure_config())
+    return config.get('preferences', key, fallback=default)
+
+
+def set_preference(key: str, value: str) -> None:
+    """Persist a non-sensitive UI preference in the central config."""
+    config_path = ensure_config()
+    config = configparser.ConfigParser()
+    config.read(config_path)
+    if not config.has_section('preferences'):
+        config.add_section('preferences')
+    config.set('preferences', key, value)
+    with open(config_path, "w") as f:
+        config.write(f)
+
 
 def create_db(password: str, name:str):
     if ss is None:

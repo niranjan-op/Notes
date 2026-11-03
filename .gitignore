@@ -261,3 +261,7 @@ libssl-3-x64.pdb
 #reference files
 storage.cpp
 app.py
+
+# Local artifacts
+graphify-out/
+build.zip

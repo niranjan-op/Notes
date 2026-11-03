@@ -21,7 +21,7 @@ jobs:
           git clone https://github.com/microsoft/vcpkg C:\vcpkg
           C:\vcpkg\bootstrap-vcpkg.bat
           C:\vcpkg\vcpkg.exe install sqlcipher:x64-windows openssl:x64-windows
-      - name: Build application
+      - name: Build application and setup installer
         shell: pwsh
         env:
           VCPKG_ROOT: C:\vcpkg
@@ -32,11 +32,14 @@ jobs:
           python setup.py build_ext --inplace
           python -m unittest discover -s tests
           python -m PyInstaller --noconfirm --clean NotesApp.spec
+          iscc packaging\installer.iss
           Compress-Archive -Path dist\NotesApp\* -DestinationPath NotesApp-windows-x64.zip
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: NotesApp-windows-x64.zip
+          path: |
+            dist/installer/*.exe
+            NotesApp-windows-x64.zip
 
   linux:
     runs-on: ubuntu-22.04
@@ -48,29 +51,91 @@ jobs:
       - name: Build application
         run: |
           sudo apt-get update
-          sudo apt-get install -y libsqlcipher-dev libssl-dev
+          sudo apt-get install -y libsqlcipher-dev libssl-dev libfuse2 file
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
           python setup.py build_ext --inplace
           python -m unittest discover -s tests
           python -m PyInstaller --noconfirm --clean NotesApp.spec
-      - name: Package AppImage
+      - name: Package AppImage and .deb installer
         run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          # 1. AppImage
           mkdir -p AppDir/usr/bin
           cp -a dist/NotesApp/. AppDir/usr/bin/
-          cp assets/notes.svg AppDir/notes.svg
+          cp assets/notes.png AppDir/notes.png
           printf '[Desktop Entry]\nType=Application\nName=Secure Notes\nExec=NotesApp\nIcon=notes\nCategories=Office;Utility;\n' > AppDir/NotesApp.desktop
           ln -s usr/bin/NotesApp AppDir/AppRun
           curl -L --fail -o appimagetool https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool
-          ARCH=x86_64 ./appimagetool AppDir NotesApp-linux-x86_64.AppImage
+          ARCH=x86_64 ./appimagetool --appimage-extract-and-run AppDir "SecureNotes-${VERSION}-linux-x86_64.AppImage"
+
+          # 2. Debian (.deb) installer
+          DEB_DIR="secure-notes_${VERSION}_amd64"
+          mkdir -p "${DEB_DIR}/DEBIAN"
+          mkdir -p "${DEB_DIR}/opt/secure-notes"
+          mkdir -p "${DEB_DIR}/usr/bin"
+          mkdir -p "${DEB_DIR}/usr/share/applications"
+          mkdir -p "${DEB_DIR}/usr/share/icons/hicolor/256x256/apps"
+          cp -a dist/NotesApp/. "${DEB_DIR}/opt/secure-notes/"
+          ln -s /opt/secure-notes/NotesApp "${DEB_DIR}/usr/bin/secure-notes"
+          cp assets/notes.png "${DEB_DIR}/usr/share/icons/hicolor/256x256/apps/secure-notes.png"
+          cat > "${DEB_DIR}/usr/share/applications/secure-notes.desktop" << 'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=Secure Notes
+          Comment=Local-first encrypted Markdown notes
+          Exec=/opt/secure-notes/NotesApp
+          Icon=secure-notes
+          Terminal=false
+          Categories=Office;Utility;
+          EOF
+          cat > "${DEB_DIR}/DEBIAN/control" << EOF
+          Package: secure-notes
+          Version: ${VERSION}
+          Section: utils
+          Priority: optional
+          Architecture: amd64
+          Maintainer: Niranjan Gadgil
+          Description: Local-first encrypted Markdown note-taking desktop application.
+          EOF
+          dpkg-deb --build --root-owner-group "${DEB_DIR}" "SecureNotes-${VERSION}-linux-amd64.deb"
       - uses: actions/upload-artifact@v4
         with:
           name: linux
-          path: NotesApp-linux-x86_64.AppImage
+          path: |
+            SecureNotes-*-linux-x86_64.AppImage
+            SecureNotes-*-linux-amd64.deb
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install native build dependencies
+        run: |
+          brew install sqlcipher openssl@3
+      - name: Build application and .dmg installer
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python setup.py build_ext --inplace
+          python -m unittest discover -s tests
+          python -m PyInstaller --noconfirm --clean NotesApp.spec
+          mkdir -p dmg-root
+          cp -R "dist/Secure Notes.app" dmg-root/
+          ln -s /Applications dmg-root/Applications
+          hdiutil create -volname "Secure Notes" -srcfolder dmg-root -ov -format UDZO "SecureNotes-${VERSION}-macos.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: SecureNotes-*-macos.dmg
 
   publish:
-    needs: [windows, linux]
+    needs: [windows, linux, macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

@@ -1,319 +1,93 @@
+"""Create a new encrypted vault."""
+
 import customtkinter as ctk
-from tkinter import filedialog, messagebox
-import os
+
+from app.core import config as cf
+from .components import PasswordField, field_label, icon_button, primary_button, text_entry
 from .styles import Colors, Fonts
-# Try/Except block to handle config import
-try:
-    # FIXED: Use full package path 'app.core' so main.py can resolve it
-    from app.core import config as cf
-except ImportError as e:
-    print(f"CRITICAL ERROR: Could not import backend. {e}")
-    # Mock config for UI testing purposes
-    class cf:
-        @staticmethod
-        def load_config(): return None
-        @staticmethod
-        def create_config(**kwargs): 
-            print("WARNING: Using MOCK backend. No DB file will be created.") 
-            return True
+
+MIN_PASSWORD_LENGTH = 6
+
 
 class SetupView(ctk.CTkFrame):
     def __init__(self, parent, controller):
-        super().__init__(parent, fg_color=Colors.bg)
+        super().__init__(parent, fg_color=Colors.bg, corner_radius=0)
         self.controller = controller
-        
-        # State
-        self.password_visible = False
-        self.confirm_password_visible = False
-        
-        # Build UI
-        self.setup_ui()
+        self._warning_job = None
+        self._build()
 
-    def setup_ui(self):
-        # --- Centered Card ---
-        self.card = ctk.CTkFrame(
-            self, 
-            fg_color=Colors.card,
-            corner_radius=15,
-            border_width=1,
-            border_color=Colors.border,
-            width=420,
-            height=560 # Slightly taller to fit everything comfortably
-        )
-        self.card.pack_propagate(False)
-        self.card.place(relx=0.5, rely=0.5, anchor="center")
+    def _build(self) -> None:
+        icon_button(self, "arrow_left", lambda: self.controller.show_frame("WelcomeView"), "Back to vaults").place(
+            x=16, y=14)
 
-        # --- Content Container ---
-        content = ctk.CTkFrame(self.card, fg_color="transparent")
-        content.pack(fill="both", expand=True, padx=40, pady=35)
+        column = ctk.CTkFrame(self, fg_color="transparent", width=360)
+        column.place(relx=0.5, rely=0.45, anchor="center")
 
-        # --- Back Button ---
-        self.back_btn = ctk.CTkButton(
-            content, 
-            text="← Back", 
-            width=50, 
-            height=20,
-            fg_color="transparent", 
-            text_color=Colors.text_sub,
-            hover_color=Colors.card,
-            font=("Segoe UI", 11),
-            anchor="w",
-            command=lambda: self.controller.show_frame("WelcomeView")
-        )
-        self.back_btn.pack(anchor="w", pady=(0, 5))
-
-        # --- Headers ---
+        ctk.CTkLabel(column, text="Create a vault", font=Fonts.header, text_color=Colors.text, anchor="w").pack(fill="x")
         ctk.CTkLabel(
-            content, 
-            text="Setup Vault", 
-            font=Fonts.header, 
-            text_color=Colors.text
-        ).pack(pady=(0, 5))
+            column, text="Notes are encrypted on this device with your master password.",
+            font=Fonts.body, text_color=Colors.text_sub, anchor="w", justify="left", wraplength=360,
+        ).pack(fill="x", pady=(4, 20))
 
-        ctk.CTkLabel(
-            content, 
-            text="Configure your secure storage", 
-            font=Fonts.sub_header, 
-            text_color=Colors.text_sub
-        ).pack(pady=(0, 15))
+        field_label(column, "Vault name").pack(fill="x", pady=(0, 4))
+        self.vault_name_entry = text_entry(column, "e.g. Personal", width=360)
+        self.vault_name_entry.pack(fill="x")
 
-        # --- Warning Label ---
-        self.warning_label = ctk.CTkLabel(
-            content,
-            text="",
-            font=("Segoe UI", 11),
-            text_color=Colors.error,
-            height=15
-        )
-        self.warning_label.pack(pady=(0, 5))
+        blocked = lambda: self.show_warning("For security, type your password.")
+        field_label(column, "Master password").pack(fill="x", pady=(14, 4))
+        self.password = PasswordField(column, f"At least {MIN_PASSWORD_LENGTH} characters", blocked)
+        self.password.pack(fill="x")
 
-        # --- Form: Location ---
-        # self.create_label(content, "Database Location")
-        # loc_frame = self.create_input_frame(content)
-        
-        # self.location_entry = ctk.CTkEntry(
-        #     loc_frame, 
-        #     border_width=0, 
-        #     fg_color="transparent", 
-        #     font=Fonts.body,
-        #     height=40,
-        #     placeholder_text="Select folder...",
-        #     text_color=Colors.text
-        # )
-        # self.location_entry.pack(side="left", fill="x", expand=True, padx=10)
-        # self.location_entry.configure(state="readonly")
+        field_label(column, "Confirm password").pack(fill="x", pady=(14, 4))
+        self.confirm = PasswordField(column, "Repeat password", blocked)
+        self.confirm.pack(fill="x")
+        self.confirm.entry.bind("<Return>", lambda _event: self.complete_setup())
 
-        # ctk.CTkButton(
-        #     loc_frame, 
-        #     text="Browse", 
-        #     width=60, 
-        #     height=32, 
-        #     font=Fonts.body_bold,
-        #     fg_color=Colors.bg, 
-        #     text_color=Colors.text, 
-        #     hover_color=Colors.border, 
-        #     # command=self.browse_location
-        # ).pack(side="right", padx=5)
+        self.warning_label = ctk.CTkLabel(column, text="", font=Fonts.small, text_color=Colors.error, height=18,
+                                          anchor="w")
+        self.warning_label.pack(fill="x", pady=(8, 4))
 
-        # --- Form: Vault Name ---
-        self.create_label(content, "Vault Name")
-        name_frame = self.create_input_frame(content)
+        self.start_btn = primary_button(column, "Create vault", self.complete_setup, height=38)
+        self.start_btn.pack(fill="x")
 
-        self.vault_name_entry = ctk.CTkEntry(
-            name_frame,
-            border_width=0,
-            fg_color="transparent",
-            font=Fonts.body,
-            placeholder_text="e.g., Personal",
-            height=40,
-            text_color=Colors.text
-        )
-        self.vault_name_entry.pack(side="left", fill="x", expand=True, padx=10)
+    def update_view(self, context=None) -> None:
+        self.vault_name_entry.delete(0, "end")
+        self.password.clear()
+        self.confirm.clear()
+        self.warning_label.configure(text="")
+        self.after(50, self.vault_name_entry.focus_set)
 
-        # --- Form: Password ---
-        self.create_label(content, "Master Password")
-        pwd_frame = self.create_input_frame(content)
-
-        self.password_entry = ctk.CTkEntry(
-            pwd_frame,
-            border_width=0,
-            fg_color="transparent",
-            font=Fonts.body,
-            placeholder_text="Min 6 characters",
-            show="●",
-            height=40,
-            text_color=Colors.text
-        )
-        self.password_entry.pack(side="left", fill="x", expand=True, padx=10)
-        
-        self.pwd_toggle_btn = self.create_icon_button(pwd_frame, self.toggle_password)
-        self.pwd_toggle_btn.pack(side="right", padx=5)
-
-        # --- Form: Confirm Password ---
-        self.create_label(content, "Confirm Password")
-        conf_frame = self.create_input_frame(content)
-
-        self.confirm_password_entry = ctk.CTkEntry(
-            conf_frame,
-            border_width=0,
-            fg_color="transparent",
-            font=Fonts.body,
-            placeholder_text="Repeat password",
-            show="●",
-            height=40,
-            text_color=Colors.text
-        )
-        self.confirm_password_entry.pack(side="left", fill="x", expand=True, padx=10)
-
-        self.confirm_pwd_toggle_btn = self.create_icon_button(conf_frame, self.toggle_confirm_password)
-        self.confirm_pwd_toggle_btn.pack(side="right", padx=5)
-
-        # Bind security events
-        for entry in [self.password_entry, self.confirm_password_entry]:
-            entry.bind("<Control-v>", lambda e, w=entry: self.prevent_paste(e, w))
-            entry.bind("<Control-c>", self.prevent_copy)
-            entry.bind("<Control-x>", self.prevent_copy)
-
-        # --- Theme Switch ---
-        theme_frame = ctk.CTkFrame(content, fg_color="transparent")
-        theme_frame.pack(fill="x", pady=(20, 20))
-        
-        ctk.CTkLabel(theme_frame, text="Dark Mode", font=Fonts.body_bold, text_color=Colors.text).pack(side="left")
-        
-        self.theme_switch = ctk.CTkSwitch(
-            theme_frame,
-            text="",
-            width=40, 
-            height=20,
-            command=self.toggle_theme,
-            onvalue="dark",
-            offvalue="light",
-            progress_color=Colors.primary,
-            button_color=Colors.text
-        )
-        self.theme_switch.pack(side="right")
-        self.theme_switch.select() # Default to dark
-
-        # --- Action Button ---
-        self.start_btn = ctk.CTkButton(
-            content, 
-            text="Initialize Vault", 
-            height=45, 
-            font=("Segoe UI", 13, "bold"),
-            fg_color=Colors.primary, 
-            hover_color=Colors.primary_hover,
-            corner_radius=8,
-            command=self.complete_setup
-        )
-        self.start_btn.pack(fill="x", pady=(5, 0))
-
-    # --- UI Helpers ---
-    def create_label(self, parent, text):
-        ctk.CTkLabel(
-            parent, 
-            text=text, 
-            font=Fonts.body_bold, 
-            text_color=Colors.text, 
-            anchor="w"
-        ).pack(fill="x", pady=(10, 2))
-
-    def create_input_frame(self, parent):
-        frame = ctk.CTkFrame(
-            parent, 
-            fg_color=Colors.input_bg, 
-            border_width=1, 
-            border_color=Colors.border, 
-            corner_radius=8, 
-            height=42
-        )
-        frame.pack(fill="x")
-        frame.pack_propagate(False)
-        return frame
-
-    def create_icon_button(self, parent, command):
-        return ctk.CTkButton(
-            parent,
-            text="🔒",
-            width=30,
-            height=30,
-            fg_color="transparent",
-            text_color=Colors.text_sub,
-            hover_color=Colors.bg,
-            font=Fonts.icon,
-            command=command
-        )
-
-    # --- Logic ---
-    def prevent_paste(self, event, entry_widget):
-        self.show_warning("For security, please type manually.")
-        return "break"
-    
-    def prevent_copy(self, event):
-        return "break"
-    
-    def show_warning(self, message):
+    def show_warning(self, message: str) -> None:
         self.warning_label.configure(text=message)
-        self.after(3000, lambda: self.warning_label.configure(text=""))
-    
-    def toggle_password(self):
-        self.password_visible = not self.password_visible
-        self.password_entry.configure(show="" if self.password_visible else "●")
-        self.pwd_toggle_btn.configure(text="🔓" if self.password_visible else "🔒")
-    
-    def toggle_confirm_password(self):
-        self.confirm_password_visible = not self.confirm_password_visible
-        self.confirm_password_entry.configure(show="" if self.confirm_password_visible else "●")
-        self.confirm_pwd_toggle_btn.configure(text="🔓" if self.confirm_password_visible else "🔒")
+        if self._warning_job:
+            self.after_cancel(self._warning_job)
+        self._warning_job = self.after(4000, lambda: self.warning_label.configure(text=""))
 
-    def toggle_theme(self):
-        ctk.set_appearance_mode(self.theme_switch.get())
-
-    # def browse_location(self):
-    #     file_path = filedialog.askdirectory(initialdir=os.getcwd())
-    #     if file_path:
-    #         self.location_entry.configure(state="normal")
-    #         self.location_entry.delete(0, "end")
-    #         self.location_entry.insert(0, file_path)
-    #         self.location_entry.configure(state="readonly")
-
-    def complete_setup(self):
-        # STRIP WHITESPACE to prevent path errors
-        # location = self.location_entry.get().strip()
+    def complete_setup(self) -> None:
         name = self.vault_name_entry.get().strip()
-        password = self.password_entry.get()
-        confirm = self.confirm_password_entry.get()
-        theme = self.theme_switch.get()
-
-        # if not location:
-        #     self.show_warning("⚠ Please select a storage location")
-        #     return
-        if not name:
-            self.show_warning("⚠ Please enter a vault name")
+        password = self.password.get()
+        problem = cf.validate_vault_name(name)
+        if problem:
+            self.show_warning(problem)
             return
-        if not password or len(password) < 6:
-            self.show_warning("⚠ Password must be at least 6 characters")
+        if len(password) < MIN_PASSWORD_LENGTH:
+            self.show_warning(f"Password must be at least {MIN_PASSWORD_LENGTH} characters.")
             return
-        if password != confirm:
-            self.show_warning("⚠ Passwords do not match")
+        if password != self.confirm.get():
+            self.show_warning("Passwords do not match.")
             return
-
-        if cf.search_config():
-            vaults, last_open_vaults = cf.read_config()
-            if name in vaults:
-                self.show_warning("⚠ A vault with this name already exists!")
-                return
-            else:
-                success_config = cf.update_config(name)
-        else:
-            success_config = cf.create_config(name)
-
-        success_db = cf.create_db(password, name)
-        success = success_config and success_db
-
-        if success:
-            messagebox.showinfo("Success", "Vault initialized!")
-            # Retrun to welcome screen to show the new vault
-            self.controller.show_frame("WelcomeView") 
-            print("Transitioning to next screen...")
-        else:
-            self.show_warning("⚠ Failed to create database")
+        vaults, _ = cf.read_config() if cf.search_config() else ([], "")
+        if name.casefold() in {vault.casefold() for vault in vaults} or cf.vault_path(name).exists():
+            self.show_warning("A vault with this name already exists.")
+            return
+        try:
+            created = cf.create_db(password, name)
+        except (OSError, ImportError):
+            created = False
+        if not created:
+            self.show_warning("The vault could not be created.")
+            return
+        cf.update_config(name)
+        self.password.clear()
+        self.confirm.clear()
+        self.controller.show_frame("LoginView", context={"vault_name": name})
