@@ -40,12 +40,14 @@ def load_config(password,name):
     if os.path.exists(app_data_path):
         print("Attempting db recovery...")
         db = ss.DbOperations(str(app_data_path))
-        if db.connect(str(password), str(name)):
-            print("Connection successful! Database recovered successfully.") 
-            return True
-        else:
+        try:
+            if db.connect(str(password), str(name)):
+                print("Connection successful! Database recovered successfully.")
+                return True
             print("Database recovery failed!")
             return False
+        finally:
+            db.close()
     else:
         # Fallback or error if directory doesn't exist
         print(f"Vault directory not found: {app_data_path}")

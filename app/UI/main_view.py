@@ -111,7 +111,7 @@ class MainView(ctk.CTkFrame):
             child.destroy()
         for note in self._notes:
             preview = note.content.replace("\n", " ").strip()[:45] or "Empty note"
-            button = ctk.CTkButton(self.note_list, text=f"{note.title}\n{preview}", anchor="w", justify="left", height=51, fg_color=Colors.input_bg if note.id == self.note_id else "transparent", hover_color=Colors.input_bg, text_color=Colors.text, command=lambda note_id=note.id: self.open_note(note_id))
+            button = ctk.CTkButton(self.note_list, text=f"{note.title}\n{preview}", anchor="w", height=51, fg_color=Colors.input_bg if note.id == self.note_id else "transparent", hover_color=Colors.input_bg, text_color=Colors.text, command=lambda note_id=note.id: self.open_note(note_id))
             button.pack(fill="x", pady=1)
 
     def open_note(self, note_id):
