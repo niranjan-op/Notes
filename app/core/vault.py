@@ -46,6 +46,9 @@ class Vault:
     def save_note(self, note_id: int, title: str, content: str, folder_id: int = 0) -> None:
         self._db.update_note(note_id, title, content, True, folder_id)
 
+    def delete_note(self, note_id: int) -> None:
+        self._db.delete_note(note_id)
+
     def create_folder(self, name: str, parent_id: int = 0) -> None:
         self._db.add_folder(name, parent_id)
 

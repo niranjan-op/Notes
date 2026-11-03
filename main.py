@@ -1,4 +1,5 @@
 import customtkinter as ctk
+import tkinter as tk
 from app.UI.setup_view import SetupView
 from app.UI.login_view import LoginView
 from app.UI.welcome_view import WelcomeView
@@ -8,7 +9,9 @@ import app.core.config as cf
 class MainApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Notes App")
+        self.title("Secure Notes")
+        self._icon = self._app_icon()
+        self.iconphoto(True, self._icon)
         self.geometry("1280x760")
         self.minsize(980, 620)
         
@@ -35,6 +38,16 @@ class MainApp(ctk.CTk):
         # 3. Check Config and Select Startup Screen
         # Always show WelcomeView first as per new design
         self.show_frame("WelcomeView")
+
+    @staticmethod
+    def _app_icon():
+        image = tk.PhotoImage(width=32, height=32)
+        image.put("#4f46e5", to=(0, 0, 32, 32))
+        image.put("#ffffff", to=(8, 5, 24, 27))
+        image.put("#80cdb2", to=(11, 11, 21, 13))
+        image.put("#80cdb2", to=(11, 16, 21, 18))
+        image.put("#80cdb2", to=(11, 21, 19, 23))
+        return image
     
     def show_frame(self, page_name, context=None):
         frame = self.frames[page_name]
