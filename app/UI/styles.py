@@ -37,6 +37,11 @@ class Colors:
     error = ("#DC2626", "#F87171")
     success = ("#15803D", "#4ADE80")
     code = ("#0F766E", "#5EEAD4")
+    code_bg = ("#F3F4F6", "#1E1E24")
+    highlight = ("#FEF08A", "#6B5A12")
+    quote_bg = ("#F8F8FA", "#1B1B20")
+    table_header_bg = ("#F1F2F6", "#23232A")
+    table_row_bg = ("#FAFAFB", "#1A1A20")
     selection = ("#C7D2FE", "#3B3F7A")    # text selection inside the editor
 
 

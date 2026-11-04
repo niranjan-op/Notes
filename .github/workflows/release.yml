@@ -32,6 +32,7 @@ jobs:
           python setup.py build_ext --inplace
           python -m unittest discover -s tests
           python -m PyInstaller --noconfirm --clean NotesApp.spec
+          if (-not (Test-Path dist\NotesApp\_internal\PIL)) { throw 'Pillow missing from bundle' }
           iscc packaging\installer.iss
           Compress-Archive -Path dist\NotesApp\* -DestinationPath NotesApp-windows-x64.zip
       - uses: actions/upload-artifact@v4
@@ -57,6 +58,7 @@ jobs:
           python setup.py build_ext --inplace
           python -m unittest discover -s tests
           python -m PyInstaller --noconfirm --clean NotesApp.spec
+          test -d dist/NotesApp/_internal/PIL || { echo 'Pillow missing from bundle'; exit 1; }
       - name: Package AppImage and .deb installer
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -125,14 +127,22 @@ jobs:
           python setup.py build_ext --inplace
           python -m unittest discover -s tests
           python -m PyInstaller --noconfirm --clean NotesApp.spec
+          test -d "dist/Secure Notes.app/Contents/Frameworks/PIL" || { echo 'Pillow missing from bundle'; exit 1; }
           mkdir -p dmg-root
           cp -R "dist/Secure Notes.app" dmg-root/
           ln -s /Applications dmg-root/Applications
-          hdiutil create -volname "Secure Notes" -srcfolder dmg-root -ov -format UDZO "SecureNotes-${VERSION}-macos.dmg"
+          # hdiutil intermittently fails with "Resource busy" on hosted runners; retry.
+          for attempt in 1 2 3 4 5; do
+            if hdiutil create -volname "Secure Notes" -srcfolder dmg-root -ov -format UDZO "SecureNotes-${VERSION}-macos-arm64.dmg"; then
+              break
+            fi
+            if [ "$attempt" = 5 ]; then exit 1; fi
+            echo "hdiutil failed (attempt $attempt), retrying..."; sleep $((attempt * 5))
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: macos
-          path: SecureNotes-*-macos.dmg
+          path: SecureNotes-*-macos-arm64.dmg
 
   publish:
     needs: [windows, linux, macos]

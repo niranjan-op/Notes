@@ -1,7 +1,9 @@
 """Small UI-facing adapter over the encrypted C++ vault."""
 from __future__ import annotations
 
+import os
 import re
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -11,6 +13,26 @@ from .config import vault_path
 
 
 LINK_PATTERN = re.compile(r"\[\[([^\]#|]+)(?:#[^\]]+)?(?:\|[^\]]+)?\]\]|\[[^\]]*\]\(([^)#]+)(?:#[^)]+)?\)")
+_UNSAFE_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_RESERVED_FILENAMES = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
+                       *(f"LPT{i}" for i in range(1, 10))}
+
+
+def safe_filename(name: str) -> str:
+    """Return a cross-platform file or folder name for ``name``."""
+    cleaned = _UNSAFE_FILENAME.sub("-", name).strip().rstrip(". ")[:120] or "Untitled"
+    if cleaned.split(".")[0].upper() in _RESERVED_FILENAMES:
+        cleaned = f"_{cleaned}"
+    return cleaned
+
+
+def _unique(name: str, used: set[str], suffix: str = "") -> str:
+    candidate, number = f"{name}{suffix}", 2
+    while candidate.casefold() in used:
+        candidate = f"{name} ({number}){suffix}"
+        number += 1
+    used.add(candidate.casefold())
+    return candidate
 
 
 @dataclass(frozen=True)
@@ -96,6 +118,47 @@ class Vault:
             raise ValueError("The vault root cannot be deleted.")
         for current in self.descendant_folder_ids(folder_id):
             self._db.delete_folder(current)
+
+    def export_zip(self, destination: Path, folder_id: int = 0) -> int:
+        """Write notes as Markdown files in a .zip that mirrors the folder tree.
+
+        Exported files are NOT encrypted. The archive is written to a temporary
+        file first and moved into place, so a failure never leaves a partial zip.
+        Returns the number of notes exported.
+        """
+        destination = Path(destination)
+        folders = {folder.id: folder for folder in self.folders()}
+        if folder_id and folder_id not in folders:
+            raise ValueError("That folder no longer exists.")
+        children: dict[int, list] = {}
+        for folder in folders.values():
+            children.setdefault(folder.parent_id if folder.parent_id in folders else 0, []).append(folder)
+        notes_by_folder: dict[int, list[Note]] = {}
+        for note in self.notes():
+            notes_by_folder.setdefault(note.folder_id if note.folder_id in folders else 0, []).append(note)
+
+        root_name = safe_filename(folders[folder_id].name if folder_id else self.name)
+        temporary = destination.with_name(destination.name + ".partial")
+        exported = 0
+        try:
+            with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                def write_folder(current: int, path: str) -> None:
+                    nonlocal exported
+                    used: set[str] = set()
+                    archive.writestr(zipfile.ZipInfo(path + "/"), "")
+                    for folder in sorted(children.get(current, []), key=lambda item: item.name.casefold()):
+                        write_folder(folder.id, f"{path}/{_unique(safe_filename(folder.name), used)}")
+                    for note in sorted(notes_by_folder.get(current, []), key=lambda item: item.title.casefold()):
+                        name = _unique(safe_filename(note.title), used, ".md")
+                        archive.writestr(f"{path}/{name}", note.content.encode("utf-8"))
+                        exported += 1
+
+                write_folder(folder_id, root_name)
+            os.replace(temporary, destination)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+        return exported
 
     def merge_database(self, source_path: Path, password: str) -> tuple[int, int]:
         """Merge a compatible Secure Notes SQLCipher database without modifying it.

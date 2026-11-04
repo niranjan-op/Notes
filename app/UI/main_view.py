@@ -10,15 +10,14 @@ from tkinter import filedialog
 import customtkinter as ctk
 
 import app.core.config as cf
-from app.core.vault import DuplicateNameError, Vault
+from app.core.vault import DuplicateNameError, Vault, safe_filename
 from .brand import icon_image, logo_image
 from .components import (
     Dialog, confirm, field_label, icon_button, primary_button, secondary_button, text_entry,
 )
-from .styles import MONO_FAMILY, Colors, Fonts, Metrics, resolve
+from .markdown_editor import MarkdownEditorController
+from .styles import Colors, Fonts, Metrics, resolve
 
-WIKI_LINK_PATTERN = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]")
-INLINE_PATTERN = re.compile(r"\*\*(.+?)\*\*|`([^`]+)`|\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|([^\]]+))?\]\]")
 EDITOR_FONTS = ("Segoe UI", "Cascadia Mono", "Georgia")
 AUTOSAVE_DELAY_MS = 650
 SEARCH_DELAY_MS = 180
@@ -26,12 +25,16 @@ NARROW_WIDTH = 1060
 WELCOME_TITLE = "Welcome to your vault"
 WELCOME_BODY = (
     "# Your notes, connected\n\n"
-    "Write in Markdown. Headings, **bold**, `code` and [[wiki links]] format as you type.\n\n"
-    "- New note: Ctrl+N\n"
-    "- New folder: Ctrl+Shift+N\n"
-    "- Search: Ctrl+F\n"
-    "- Lock vault: Ctrl+L\n"
-    "- Right-click a note or folder for more actions\n"
+    "Write in Markdown. Headings, **bold**, *italic*, ==highlights==, `code`, tables and [[wiki links]] format as you type.\n\n"
+    "| Shortcut | Action |\n"
+    "| :--- | :--- |\n"
+    "| `Ctrl+N` | New note |\n"
+    "| `Ctrl+Shift+N` | New folder |\n"
+    "| `Ctrl+F` | Search |\n"
+    "| `Ctrl+E` | Toggle Live Preview / Source |\n"
+    "| `Ctrl+L` | Lock vault |\n\n"
+    "- [x] Local-first encrypted storage\n"
+    "- [ ] Create a note or link with [[Note title]]\n"
 )
 
 TreeKey = tuple[str, int]  # ("note" | "folder", id)
@@ -121,6 +124,8 @@ class MainView(ctk.CTkFrame):
         footer.grid(row=4, column=0, sticky="ew", padx=8, pady=6)
         icon_button(footer, "settings", self.show_settings, "Settings  (Ctrl+,)").pack(side="left")
         icon_button(footer, "theme", self.toggle_theme, "Toggle light / dark").pack(side="left", padx=(2, 0))
+        icon_button(footer, "export", lambda: self.export_vault_zip(0), "Export vault as .zip").pack(
+            side="left", padx=(2, 0))
         icon_button(footer, "lock", self.lock, "Lock vault  (Ctrl+L)").pack(side="right")
 
     def _build_editor(self) -> None:
@@ -155,12 +160,15 @@ class MainView(ctk.CTkFrame):
         self.editor.grid(row=2, column=0, sticky="nsew", padx=(24, 8), pady=(0, 12))
         text = self.editor._textbox
         text.configure(spacing1=2, spacing3=4, padx=4, undo=True, maxundo=-1, autoseparators=True)
-        text.tag_bind("md-link", "<Button-1>", self.open_wiki_link)
-        text.tag_bind("md-link", "<Enter>", lambda _e: text.configure(cursor="hand2"))
-        text.tag_bind("md-link", "<Leave>", lambda _e: text.configure(cursor="xterm"))
         self.empty_hint = ctk.CTkLabel(self.editor, text="Start writing — Markdown formats as you type.",
                                        font=Fonts.body, text_color=Colors.text_faint)
         self.empty_hint.bind("<Button-1>", lambda _e: self.editor.focus_set())
+        self.md_controller = MarkdownEditorController(
+            self.editor,
+            on_open_wikilink=self._open_wikilink_target,
+            on_modified=self.queue_save,
+            font_family=self._editor_family,
+        )
         self.editor.bind("<KeyRelease>", self.queue_save)
         self.editor.bind("<KeyRelease>", self.render_markdown, add="+")
         self.editor.bind("<Control-s>", self.save)
@@ -193,6 +201,7 @@ class MainView(ctk.CTkFrame):
             "<Control-n>": self.new_note,
             "<Control-N>": lambda: self.new_folder(),
             "<Control-f>": self._focus_search,
+            "<Control-e>": self.toggle_editor_mode,
             "<Control-l>": self.lock,
             "<Control-comma>": self.show_settings,
         }
@@ -491,7 +500,11 @@ class MainView(ctk.CTkFrame):
                 menu.add_command(label="Collapse" if expanded else "Expand",
                                  command=lambda: self.toggle_folder(key[1]))
                 menu.add_separator()
+                menu.add_command(label="Export folder as .zip…", command=lambda: self.export_vault_zip(key[1]))
                 menu.add_command(label="Delete folder…", command=lambda: self.delete_folder(key[1]))
+            else:
+                menu.add_separator()
+                menu.add_command(label="Export vault as .zip…", command=lambda: self.export_vault_zip(0))
         else:
             menu.add_command(label="Open", command=lambda: self.open_note(key[1]))
             menu.add_separator()
@@ -742,56 +755,32 @@ class MainView(ctk.CTkFrame):
 
     # ------------------------------------------------------------- markdown
     def render_markdown(self, _event=None) -> None:
-        widget = self.editor._textbox
-        for tag in ("md-heading1", "md-heading2", "md-heading3", "md-bold", "md-code", "md-link", "md-table"):
-            widget.tag_remove(tag, "1.0", "end")
         raw = self.editor.get("1.0", "end-1c")
         if raw.strip() or self.note_id is None:
             self.empty_hint.place_forget()
         else:
             self.empty_hint.place(relx=0.5, rely=0.3, anchor="center")
-        for number, line in enumerate(raw.splitlines(), 1):
-            heading = re.match(r"^(#{1,3})\s+", line)
-            if heading:
-                widget.tag_add(f"md-heading{len(heading.group(1))}", f"{number}.0", f"{number}.end")
-            if line.count("|") >= 2:
-                widget.tag_add("md-table", f"{number}.0", f"{number}.end")
-            for match in INLINE_PATTERN.finditer(line):
-                start, end = f"{number}.{match.start()}", f"{number}.{match.end()}"
-                tag = "md-bold" if match.group(1) else "md-code" if match.group(2) else "md-link"
-                widget.tag_add(tag, start, end)
+        self.md_controller.render()
 
     def _apply_editor_theme(self) -> None:
         """Re-resolve plain-Tk colours that CustomTkinter does not manage."""
-        widget = self.editor._textbox
-        family = self._editor_family
-        widget.configure(selectbackground=resolve(Colors.selection), selectforeground=resolve(Colors.text),
-                         inactiveselectbackground=resolve(Colors.active), insertbackground=resolve(Colors.text))
-        widget.tag_configure("md-heading1", font=(family, 24, "bold"), spacing1=10, spacing3=6)
-        widget.tag_configure("md-heading2", font=(family, 20, "bold"), spacing1=8, spacing3=4)
-        widget.tag_configure("md-heading3", font=(family, 17, "bold"), spacing1=6, spacing3=2)
-        widget.tag_configure("md-bold", font=(family, 15, "bold"))
-        widget.tag_configure("md-code", font=(MONO_FAMILY, 13), foreground=resolve(Colors.code))
-        widget.tag_configure("md-link", foreground=resolve(Colors.primary), underline=True)
-        widget.tag_configure("md-table", font=(MONO_FAMILY, 13), background=resolve(Colors.sidebar))
+        self.md_controller.set_font_family(self._editor_family)
+        self.md_controller.apply_theme()
         self.render_markdown()
 
-    def open_wiki_link(self, event):
+    def toggle_editor_mode(self) -> None:
+        self.md_controller.set_live_preview(not self.md_controller.live_preview)
+        mode_label = "Live Preview" if self.md_controller.live_preview else "Source mode"
+        self.status.configure(text=mode_label, text_color=Colors.text_faint)
+
+    def _open_wikilink_target(self, raw_target: str) -> None:
         """Open the vault note targeted by a clicked wiki link."""
-        widget = self.editor._textbox
-        line_number, column = map(int, widget.index(f"@{event.x},{event.y}").split("."))
-        line = widget.get(f"{line_number}.0", f"{line_number}.end")
-        for match in WIKI_LINK_PATTERN.finditer(line):
-            if match.start() <= column < match.end():
-                target = match.group(1).strip().casefold()
-                note = next((item for item in self._all_notes if item.title.casefold() == target), None)
-                if note:
-                    self.open_note(note.id)
-                else:
-                    self.status.configure(text=f"No note named “{match.group(1).strip()}”",
-                                          text_color=Colors.text_faint)
-                return "break"
-        return None
+        target = raw_target.strip().casefold()
+        note = next((item for item in self._all_notes if item.title.casefold() == target), None)
+        if note:
+            self.open_note(note.id)
+        else:
+            self.status.configure(text=f"No note named “{raw_target.strip()}”", text_color=Colors.text_faint)
 
     def show_backlinks(self) -> None:
         for child in self.side.winfo_children():
@@ -892,7 +881,12 @@ class MainView(ctk.CTkFrame):
         font.set(self._editor_family)
         font.pack(fill="x")
 
-        section("IMPORT")
+        section("IMPORT & EXPORT")
+        export_btn = secondary_button(
+            dialog.body, "Export vault as .zip…", lambda: self.export_vault_zip(0),
+            image=icon_image("export", 15), compound="left", anchor="w",
+        )
+        export_btn.pack(fill="x", pady=3)
         for label, action in (("Import Markdown file…", self.import_markdown),
                               ("Import folder of notes…", self.import_directory),
                               ("Merge another vault…", self.import_database)):
@@ -904,7 +898,47 @@ class MainView(ctk.CTkFrame):
         primary_button(row, "Done", dialog.close, width=96).pack(side="right")
         dialog.present()
 
-    # ---------------------------------------------------------------- import
+    # ---------------------------------------------------------------- import & export
+    def export_vault_zip(self, folder_id: int = 0) -> None:
+        """Export the vault (or a folder subtree) as a unencrypted Markdown .zip archive."""
+        if not self.vault:
+            return
+        self.save()
+        folder = self._folder(folder_id) if folder_id else None
+        subject = folder.name if folder else self.vault.name
+        default_name = f"{safe_filename(subject)}.zip"
+        confirm(
+            self,
+            f"Export “{subject}” as .zip",
+            "This creates an unencrypted .zip archive containing your Markdown notes and folder hierarchy. "
+            "Anyone with access to the exported file will be able to read its contents.",
+            "Choose location…",
+            lambda: self._export_zip_to_file(folder_id, default_name),
+            danger=False,
+        )
+
+    def _export_zip_to_file(self, folder_id: int, default_name: str) -> None:
+        if not self.vault:
+            return
+        path = filedialog.asksaveasfilename(
+            parent=self.winfo_toplevel(),
+            title="Export Markdown .zip",
+            initialfile=default_name,
+            defaultextension=".zip",
+            filetypes=[("ZIP archive", "*.zip")],
+        )
+        if not path:
+            return
+        try:
+            count = self.vault.export_zip(Path(path), folder_id=folder_id)
+        except (OSError, ValueError) as error:
+            self.status.configure(text=f"Export failed: {error}", text_color=Colors.error)
+            return
+        self.status.configure(
+            text=f"Exported {count} note{'s' if count != 1 else ''} to {Path(path).name}",
+            text_color=Colors.text_faint,
+        )
+
     def import_markdown(self) -> None:
         path = filedialog.askopenfilename(parent=self.winfo_toplevel(),
                                           filetypes=[("Markdown", "*.md *.markdown"), ("Text", "*.txt")])

@@ -1,11 +1,20 @@
 import gc
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 import secure_storage
 
 import app.core.config as cf
+from app.core.markdown import (
+    analyze,
+    next_list_prefix,
+    parse_inline,
+    plain_text,
+    split_table_row,
+    table_alignments,
+)
 from app.core.vault import DuplicateNameError, Vault
 
 
@@ -102,6 +111,60 @@ class VaultFolderAndDeletionTests(unittest.TestCase):
         cf.set_preference("theme", "light")
         self.assertEqual(cf.get_preference("theme"), "light")
         self.assertEqual(cf.read_config()[0], ["alpha"])
+
+    def test_export_zip_preserves_hierarchy_and_deduplicates_filenames(self):
+        eng = self.vault.create_folder("Engineering")
+        sub = self.vault.create_folder("API:Specs", eng)
+        self.vault.create_note("Overview", "# Overview", 0)
+        self.vault.create_note("Endpoints", "GET /v1", sub)
+        self.vault.create_note("Endpoints", "POST /v1", sub)  # duplicate title in same folder
+        dest = Path(self._tmp.name) / "export.zip"
+        count = self.vault.export_zip(dest)
+        self.assertEqual(count, 3)
+        with zipfile.ZipFile(dest, "r") as zf:
+            names = set(zf.namelist())
+            self.assertIn("alpha/Overview.md", names)
+            self.assertIn("alpha/Engineering/API-Specs/Endpoints.md", names)
+            self.assertIn("alpha/Engineering/API-Specs/Endpoints (2).md", names)
+            self.assertEqual(zf.read("alpha/Overview.md").decode("utf-8"), "# Overview")
+
+
+class MarkdownAnalysisTests(unittest.TestCase):
+    def test_heading_markers_and_inline_tokens(self):
+        doc = "# Hello **World** and [[Target|Alias]]\nParagraph with `code` and ==mark==."
+        infos = analyze(doc)
+        self.assertEqual(infos[0].kind, "heading")
+        self.assertEqual(infos[0].level, 1)
+        self.assertEqual(infos[0].marker_end, 2)  # "# "
+        tokens = parse_inline(doc.splitlines()[0], base=0)
+        kinds = [t.kind for t in tokens]
+        self.assertEqual(kinds, ["bold", "wikilink"])
+        self.assertEqual(tokens[0].markers, [(8, 10), (15, 17)])
+        self.assertEqual(tokens[1].target, "Target")
+        self.assertEqual(plain_text("Hello **World** [[Target|Alias]]"), "Hello World Alias")
+
+    def test_table_and_code_fence_blocks(self):
+        doc = (
+            "| Name | Score |\n"
+            "| :--- | ---: |\n"
+            "| Alice | 95 |\n\n"
+            "```python\n"
+            "# Not a heading\n"
+            "```\n"
+        )
+        infos = analyze(doc)
+        self.assertEqual(
+            [i.kind for i in infos],
+            ["table_header", "table_separator", "table_row", "blank", "fence", "code", "fence", "blank"],
+        )
+        self.assertEqual(table_alignments("| :--- | :---: | ---: |"), ["left", "center", "right"])
+        cells = split_table_row("| Alice | 95 |")
+        self.assertEqual(["| Alice | 95 |"[s:e] for s, e in cells], ["Alice", "95"])
+
+    def test_list_and_task_continuation(self):
+        self.assertEqual(next_list_prefix("- [ ] Buy milk"), ("- [ ] ", False))
+        self.assertEqual(next_list_prefix("1. First"), ("2. ", False))
+        self.assertEqual(next_list_prefix("- "), ("- ", True))
 
 
 if __name__ == "__main__":

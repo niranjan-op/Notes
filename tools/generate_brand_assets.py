@@ -39,7 +39,9 @@ def main() -> None:
     mark.resize((256, 256), Image.Resampling.LANCZOS).save(ASSETS / "notes.png")
     sizes = [(16, 16), (20, 20), (24, 24), (32, 32), (40, 40), (48, 48), (64, 64), (128, 128), (256, 256)]
     mark.resize((256, 256), Image.Resampling.LANCZOS).save(ASSETS / "notes.ico", sizes=sizes)
-    print(f"Wrote {ASSETS / 'notes.png'} and {ASSETS / 'notes.ico'}")
+    # macOS app bundles need .icns; Pillow writes every required size from a 1024px source.
+    mark.save(ASSETS / "notes.icns")
+    print(f"Wrote {ASSETS / 'notes.png'}, {ASSETS / 'notes.ico'} and {ASSETS / 'notes.icns'}")
 
 
 if __name__ == "__main__":

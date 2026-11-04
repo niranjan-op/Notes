@@ -16,7 +16,7 @@ import customtkinter as ctk
 from PIL import Image, ImageDraw
 
 APP_NAME = "Secure Notes"
-APP_VERSION = "1.2.1"   # keep in sync with packaging/installer.iss and packaging/version_info.txt
+APP_VERSION = "1.3.0"   # keep in sync with packaging/installer.iss and packaging/version_info.txt
 APP_USER_MODEL_ID = "SecureNotes.Desktop.App"
 
 _GRID = 24
@@ -174,6 +174,10 @@ def _draw(name: str, color: str) -> Image.Image:
         pen.line((4, 15), (4, 19), (5, 20), (19, 20), (20, 19), (20, 15))
         pen.line((12, 4), (12, 15))
         pen.line((7.5, 10.5), (12, 15), (16.5, 10.5))
+    elif name == "export":
+        pen.line((4, 15), (4, 19), (5, 20), (19, 20), (20, 19), (20, 15))
+        pen.line((12, 15), (12, 4))
+        pen.line((7.5, 8.5), (12, 4), (16.5, 8.5))
     elif name == "close":
         pen.line((6, 6), (18, 18))
         pen.line((18, 6), (6, 18))
