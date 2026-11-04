@@ -15,6 +15,7 @@ from app.core.markdown import (
     split_table_row,
     table_alignments,
 )
+from app.core.updater import is_newer_version, parse_version, release_from_payload
 from app.core.vault import DuplicateNameError, Vault
 
 
@@ -165,6 +166,50 @@ class MarkdownAnalysisTests(unittest.TestCase):
         self.assertEqual(next_list_prefix("- [ ] Buy milk"), ("- [ ] ", False))
         self.assertEqual(next_list_prefix("1. First"), ("2. ", False))
         self.assertEqual(next_list_prefix("- "), ("- ", True))
+
+    def test_large_document_analysis_stays_fast(self):
+        block = "# Section\nParagraph with **bold**, *italic*, `code` and [[Link|Alias]].\n- [ ] Task item\n\n"
+        large_doc = block * 500
+        infos = analyze(large_doc)
+        self.assertEqual(len(infos), 2001)
+        self.assertEqual(infos[0].kind, "heading")
+        self.assertEqual(infos[1].kind, "paragraph")
+        self.assertEqual(infos[2].kind, "list")
+        self.assertEqual(infos[2].task, " ")
+
+
+class UpdaterTests(unittest.TestCase):
+    def test_version_comparison(self):
+        self.assertEqual(parse_version("v1.3.0"), (1, 3, 0))
+        self.assertTrue(is_newer_version("v1.4.0", "1.3.0"))
+        self.assertTrue(is_newer_version("1.3.1", "1.3.0"))
+        self.assertFalse(is_newer_version("v1.3.0", "1.3.0"))
+        self.assertFalse(is_newer_version("v1.2.9", "1.3.0"))
+
+    def test_release_payload_extracts_trusted_windows_installer(self):
+        payload = {
+            "tag_name": "v1.4.0",
+            "draft": False,
+            "prerelease": False,
+            "html_url": "https://github.com/niranjan-op/Notes/releases/tag/v1.4.0",
+            "assets": [
+                {
+                    "name": "NotesApp-windows-x64.zip",
+                    "browser_download_url": "https://github.com/niranjan-op/Notes/releases/download/v1.4.0/NotesApp-windows-x64.zip",
+                    "size": 12000,
+                },
+                {
+                    "name": "SecureNotes-Setup-1.4.0-x64.exe",
+                    "browser_download_url": "https://github.com/niranjan-op/Notes/releases/download/v1.4.0/SecureNotes-Setup-1.4.0-x64.exe",
+                    "size": 45000000,
+                },
+            ],
+        }
+        info = release_from_payload(payload, "1.3.0")
+        self.assertIsNotNone(info)
+        self.assertEqual(info.version, "1.4.0")
+        self.assertEqual(info.installer_name, "SecureNotes-Setup-1.4.0-x64.exe")
+        self.assertIsNone(release_from_payload(payload, "1.4.0"))
 
 
 if __name__ == "__main__":

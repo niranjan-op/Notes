@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import ctypes
+import gc
 import re
+import sys
+import threading
 import tkinter as tk
+import webbrowser
 from pathlib import Path
 from tkinter import filedialog
 
 import customtkinter as ctk
 
 import app.core.config as cf
-from app.core.vault import DuplicateNameError, Vault, safe_filename
-from .brand import icon_image, logo_image
+from app.core.updater import ReleaseInfo, check_for_update, download_installer, launch_windows_installer
+from app.core.vault import DuplicateNameError, Note, Vault, safe_filename
+from .brand import APP_VERSION, icon_image, logo_image
 from .components import (
     Dialog, confirm, field_label, icon_button, primary_button, secondary_button, text_entry,
 )
@@ -32,6 +38,7 @@ WELCOME_BODY = (
     "| `Ctrl+Shift+N` | New folder |\n"
     "| `Ctrl+F` | Search |\n"
     "| `Ctrl+E` | Toggle Live Preview / Source |\n"
+    "| `Ctrl+R` | Toggle Reading / Editing mode |\n"
     "| `Ctrl+L` | Lock vault |\n\n"
     "- [x] Local-first encrypted storage\n"
     "- [ ] Create a note or link with [[Note title]]\n"
@@ -53,6 +60,7 @@ class MainView(ctk.CTkFrame):
         self.expanded_folders: set[int] = set()
         self._all_notes = []
         self._folders = []
+        self._note_links: dict[int, set[str]] = {}
         self._rows: dict[TreeKey, tuple[ctk.CTkFrame, ctk.CTkLabel]] = {}
         self._hover_key: TreeKey | None = None
         self._save_job = None
@@ -143,8 +151,12 @@ class MainView(ctk.CTkFrame):
         self.status.grid(row=0, column=1, padx=(8, 8))
         self.delete_button = icon_button(bar, "trash", self.delete_current_note, "Delete note")
         self.delete_button.grid(row=0, column=2)
+        self.reading_mode_button = icon_button(
+            bar, "book", self.toggle_reading_mode, "Toggle reading mode  (Ctrl+R)"
+        )
+        self.reading_mode_button.grid(row=0, column=3, padx=(2, 0))
         icon_button(bar, "panel_right", self.toggle_context_panel, "Toggle backlinks panel").grid(
-            row=0, column=3, padx=(2, 0))
+            row=0, column=4, padx=(2, 0))
 
         self.title = ctk.CTkEntry(center, placeholder_text="Untitled", font=Fonts.title, border_width=0,
                                   fg_color="transparent", text_color=Colors.text,
@@ -159,7 +171,7 @@ class MainView(ctk.CTkFrame):
                                      scrollbar_button_hover_color=Colors.text_faint)
         self.editor.grid(row=2, column=0, sticky="nsew", padx=(24, 8), pady=(0, 12))
         text = self.editor._textbox
-        text.configure(spacing1=2, spacing3=4, padx=4, undo=True, maxundo=-1, autoseparators=True)
+        text.configure(spacing1=2, spacing3=4, padx=4, undo=True, maxundo=250, autoseparators=True)
         self.empty_hint = ctk.CTkLabel(self.editor, text="Start writing — Markdown formats as you type.",
                                        font=Fonts.body, text_color=Colors.text_faint)
         self.empty_hint.bind("<Button-1>", lambda _e: self.editor.focus_set())
@@ -170,7 +182,7 @@ class MainView(ctk.CTkFrame):
             font_family=self._editor_family,
         )
         self.editor.bind("<KeyRelease>", self.queue_save)
-        self.editor.bind("<KeyRelease>", self.render_markdown, add="+")
+        self.editor.bind("<KeyRelease>", self._update_empty_hint, add="+")
         self.editor.bind("<Control-s>", self.save)
         self.title.bind("<Control-s>", self.save)
 
@@ -202,6 +214,7 @@ class MainView(ctk.CTkFrame):
             "<Control-N>": lambda: self.new_folder(),
             "<Control-f>": self._focus_search,
             "<Control-e>": self.toggle_editor_mode,
+            "<Control-r>": self.toggle_reading_mode,
             "<Control-l>": self.lock,
             "<Control-comma>": self.show_settings,
         }
@@ -221,12 +234,51 @@ class MainView(ctk.CTkFrame):
         self.search.select_range(0, "end")
 
     # ------------------------------------------------------------- lifecycle
+    @staticmethod
+    def _release_memory() -> None:
+        """Collect cyclic garbage and return unused heap/working-set pages to the OS."""
+        gc.collect()
+        if sys.platform.startswith("win"):
+            try:
+                ctypes.cdll.msvcrt._heapmin()
+                k32 = ctypes.WinDLL("kernel32")
+                k32.GetCurrentProcess.restype = ctypes.c_void_p
+                ctypes.WinDLL("psapi").EmptyWorkingSet(ctypes.c_void_p(k32.GetCurrentProcess()))
+            except (AttributeError, OSError):
+                pass
+
+    def _set_title_text(self, value: str) -> None:
+        was_readonly = self.md_controller.reading_mode
+        if was_readonly:
+            self.title.configure(state="normal")
+        self.title.delete(0, "end")
+        if value:
+            self.title.insert(0, value)
+        if was_readonly:
+            self.title.configure(state="readonly")
+
+    def _set_editor_text(self, content: str) -> None:
+        """Replace editor text without recording full-document copies in Tcl's undo stack."""
+        tb = self.editor._textbox
+        tb.configure(state="normal", undo=False)
+        try:
+            self.editor.delete("1.0", "end")
+            if content:
+                self.editor.insert("1.0", content)
+            tb.edit_reset()
+        finally:
+            tb.configure(
+                undo=True,
+                state="disabled" if self.md_controller.reading_mode else "normal",
+                insertwidth=0 if self.md_controller.reading_mode else 2,
+            )
+
     def update_view(self, context=None) -> None:
         if not context:
             return
+        if self.vault:
+            self.lock(navigate=False)
         try:
-            if self.vault:
-                self.vault.close()
             self.vault = Vault(context["vault_name"], context["password"])
         except (KeyError, ValueError):
             self.vault = None
@@ -265,13 +317,16 @@ class MainView(ctk.CTkFrame):
         self.note_id = None
         self.selection = None
         self._all_notes, self._folders = [], []
-        self.title.delete(0, "end")
-        self.editor.delete("1.0", "end")
-        self.editor._textbox.edit_reset()
+        self._note_links.clear()
+        self.set_reading_mode(False, announce=False)
+        self.md_controller.reset()
+        self._set_title_text("")
+        self._set_editor_text("")
         self.search.delete(0, "end")
         self._clear_tree()
         for child in self.side.winfo_children():
             child.destroy()
+        self._release_memory()
         if navigate:
             self.controller.show_frame("WelcomeView")
 
@@ -279,6 +334,10 @@ class MainView(ctk.CTkFrame):
     def _reload(self) -> None:
         self._all_notes = self.vault.notes() if self.vault else []
         self._folders = list(self.vault.folders()) if self.vault else []
+        self._note_links = {
+            note.id: {link.casefold() for link in Vault.links(note.content)}
+            for note in self._all_notes
+        }
 
     def _note(self, note_id: int | None):
         return next((note for note in self._all_notes if note.id == note_id), None)
@@ -364,8 +423,9 @@ class MainView(ctk.CTkFrame):
                          anchor="w").pack(fill="x", padx=12, pady=8)
 
     def _render_search_results(self, query: str) -> None:
+        pattern = re.compile(re.escape(query), re.IGNORECASE)
         matches = [note for note in self._all_notes
-                   if query in note.title.casefold() or query in note.content.casefold()]
+                   if query in note.title.casefold() or pattern.search(note.content) is not None]
         if not matches:
             ctk.CTkLabel(self.tree, text="No matching notes", font=Fonts.small, text_color=Colors.text_faint,
                          anchor="w").pack(fill="x", padx=12, pady=8)
@@ -529,24 +589,35 @@ class MainView(ctk.CTkFrame):
     def open_note(self, note_id: int) -> None:
         if not self.vault:
             return
+        if note_id == self.note_id and self._note(note_id) is not None:
+            return
         self.save()
-        self._reload()
+        if not self._all_notes:
+            self._reload()
         note = self._note(note_id)
         if not note:
-            return
+            self._reload()
+            note = self._note(note_id)
+            if not note:
+                return
+        prev_note = self._note(self.note_id)
+        was_large = prev_note is not None and len(prev_note.content) > 200_000
         self.note_id = note.id
         self.folder_id = note.folder_id
         self._saved_title = note.title
         self.empty_state.grid_forget()
-        self.title.delete(0, "end")
-        self.title.insert(0, note.title)
-        self.editor.delete("1.0", "end")
-        self.editor.insert("1.0", note.content)
-        self.editor._textbox.edit_reset()
+        self._set_title_text(note.title)
+        self.md_controller.reset()
+        self._set_editor_text(note.content)
+        if was_large:
+            self._release_memory()
         self.editor.mark_set("insert", "1.0")
         self.editor.see("1.0")
         self.render_markdown()
-        self.status.configure(text=f"Edited {note.updated_at}" if note.updated_at else "", text_color=Colors.text_faint)
+        if self.md_controller.reading_mode:
+            self.status.configure(text="Reading mode", text_color=Colors.primary)
+        else:
+            self.status.configure(text=f"Edited {note.updated_at}" if note.updated_at else "", text_color=Colors.text_faint)
         self._update_breadcrumb()
         previous_expanded = set(self.expanded_folders)
         self._expand_to(note.folder_id)
@@ -559,8 +630,9 @@ class MainView(ctk.CTkFrame):
 
     def _show_empty_state(self) -> None:
         self.note_id = None
-        self.title.delete(0, "end")
-        self.editor.delete("1.0", "end")
+        self.md_controller.reset()
+        self._set_title_text("")
+        self._set_editor_text("")
         self.breadcrumb.configure(text="")
         self.status.configure(text="")
         self.empty_state.grid(row=0, column=0, rowspan=3, sticky="nsew")
@@ -574,9 +646,11 @@ class MainView(ctk.CTkFrame):
     def new_note(self, folder_id: int | None = None) -> None:
         if not self.vault:
             return
+        if self.md_controller.reading_mode:
+            self.set_reading_mode(False, announce=False)
         self.save()
         folder_id = self._target_folder() if folder_id is None else folder_id
-        existing = {note.title.casefold() for note in self.vault.notes()}
+        existing = {note.title.casefold() for note in self._all_notes}
         title, number = "Untitled", 1
         while title.casefold() in existing:
             number += 1
@@ -614,6 +688,7 @@ class MainView(ctk.CTkFrame):
         self.refresh_tree()
         if self.note_id is None:
             self._open_fallback_note()
+        self._release_memory()
         self.status.configure(text="Note deleted", text_color=Colors.text_faint)
 
     def _open_fallback_note(self) -> None:
@@ -712,12 +787,20 @@ class MainView(ctk.CTkFrame):
         self.refresh_tree()
         if self.note_id is None:
             self._open_fallback_note()
+        self._release_memory()
         self.status.configure(text="Folder deleted", text_color=Colors.text_faint)
 
     # ------------------------------------------------------------------ save
     def queue_save(self, event=None) -> None:
-        if self.note_id is None or (event is not None and event.keysym in {"Control_L", "Control_R", "Shift_L",
-                                                                           "Shift_R", "Alt_L", "Alt_R"}):
+        if self.note_id is None or self.md_controller.reading_mode or (
+            event is not None
+            and event.keysym
+            in {
+                "Control_L", "Control_R", "Shift_L", "Shift_R", "Alt_L", "Alt_R",
+                "Up", "Down", "Left", "Right", "Prior", "Next", "Home", "End",
+                "Escape", "Caps_Lock",
+            }
+        ):
             return
         if self._save_job:
             self.after_cancel(self._save_job)
@@ -739,7 +822,17 @@ class MainView(ctk.CTkFrame):
         if note and note.title == title and note.content == content:
             return "break"
         self.vault.save_note(self.note_id, title, content, self.folder_id)
-        self._reload()
+        updated = Note(
+            self.note_id,
+            self.folder_id,
+            title,
+            content,
+            note.is_markdown if note else True,
+            note.created_at if note else "",
+            note.updated_at if note else "",
+        )
+        self._all_notes = [updated if item.id == self.note_id else item for item in self._all_notes]
+        self._note_links[self.note_id] = {link.casefold() for link in Vault.links(content)}
         duplicate = any(other.id != self.note_id and other.title.casefold() == title.casefold()
                         for other in self._all_notes)
         if duplicate:
@@ -750,16 +843,23 @@ class MainView(ctk.CTkFrame):
             self._saved_title = title
             if ("note", self.note_id) in self._rows:
                 self._rows[("note", self.note_id)][1].configure(text=title)
-        self.show_backlinks()
+            self.show_backlinks()
         return "break"
 
     # ------------------------------------------------------------- markdown
-    def render_markdown(self, _event=None) -> None:
-        raw = self.editor.get("1.0", "end-1c")
-        if raw.strip() or self.note_id is None:
+    def _update_empty_hint(self, _event=None) -> None:
+        if (
+            self.note_id is None
+            or self.md_controller.reading_mode
+            or self.editor._textbox.compare("end-1c", ">", "1.200")
+            or self.editor.get("1.0", "1.200").strip()
+        ):
             self.empty_hint.place_forget()
         else:
             self.empty_hint.place(relx=0.5, rely=0.3, anchor="center")
+
+    def render_markdown(self, _event=None) -> None:
+        self._update_empty_hint()
         self.md_controller.render()
 
     def _apply_editor_theme(self) -> None:
@@ -769,9 +869,30 @@ class MainView(ctk.CTkFrame):
         self.render_markdown()
 
     def toggle_editor_mode(self) -> None:
+        if self.md_controller.reading_mode:
+            self.set_reading_mode(False, announce=False)
         self.md_controller.set_live_preview(not self.md_controller.live_preview)
         mode_label = "Live Preview" if self.md_controller.live_preview else "Source mode"
         self.status.configure(text=mode_label, text_color=Colors.text_faint)
+
+    def toggle_reading_mode(self) -> None:
+        self.set_reading_mode(not self.md_controller.reading_mode)
+
+    def set_reading_mode(self, enabled: bool, announce: bool = True) -> None:
+        if enabled:
+            self.save()
+        self.title.configure(state="readonly" if enabled else "normal")
+        self.md_controller.set_reading_mode(enabled)
+        self.reading_mode_button.configure(
+            image=icon_image("book", 17, "primary" if enabled else "muted"),
+            fg_color=Colors.selected if enabled else "transparent",
+        )
+        self._update_empty_hint()
+        if announce and self.note_id is not None:
+            if enabled:
+                self.status.configure(text="Reading mode", text_color=Colors.primary)
+            else:
+                self.status.configure(text="Editing", text_color=Colors.text_faint)
 
     def _open_wikilink_target(self, raw_target: str) -> None:
         """Open the vault note targeted by a clicked wiki link."""
@@ -789,8 +910,10 @@ class MainView(ctk.CTkFrame):
             return
         title = self.title.get().strip()
         wanted = title.casefold()
-        links = [note for note in self._all_notes
-                 if note.id != self.note_id and wanted in {link.casefold() for link in Vault.links(note.content)}]
+        links = [
+            note for note in self._all_notes
+            if note.id != self.note_id and wanted in self._note_links.get(note.id, set())
+        ]
         if not links:
             ctk.CTkLabel(self.side, text="No other notes link here yet.", font=Fonts.small,
                          text_color=Colors.text_sub, anchor="w", justify="left", wraplength=190).pack(
@@ -893,6 +1016,121 @@ class MainView(ctk.CTkFrame):
             button = secondary_button(dialog.body, label, action, image=icon_image("import", 15), compound="left",
                                       anchor="w")
             button.pack(fill="x", pady=3)
+
+        section("UPDATES")
+        update_status = ctk.CTkLabel(
+            dialog.body,
+            text=f"Current version: v{APP_VERSION}",
+            font=Fonts.small,
+            text_color=Colors.text_sub,
+            anchor="w",
+            justify="left",
+            wraplength=330,
+        )
+        update_status.pack(fill="x", pady=(0, 6))
+        pending_release: list[ReleaseInfo | None] = [None]
+
+        def install_update(release: ReleaseInfo) -> None:
+            if not (sys.platform.startswith("win") and release.installer_url):
+                webbrowser.open(release.html_url)
+                return
+            update_btn.configure(state="disabled", text="Downloading update…")
+            update_status.configure(text=f"Downloading v{release.version}…", text_color=Colors.text_sub)
+
+            def on_progress(done: int, total: int) -> None:
+                if not dialog.winfo_exists():
+                    return
+                if total > 0:
+                    pct = int(done * 100 / total)
+                    mb = done / (1024 * 1024)
+                    total_mb = total / (1024 * 1024)
+                    msg = f"Downloading v{release.version}: {mb:.1f} / {total_mb:.1f} MB ({pct}%)"
+                else:
+                    msg = f"Downloading v{release.version}: {done / (1024 * 1024):.1f} MB"
+                self.after(0, lambda m=msg: update_status.configure(text=m) if dialog.winfo_exists() else None)
+
+            def worker() -> None:
+                try:
+                    installer_path = download_installer(release, on_progress=on_progress)
+                except Exception as exc:
+                    err = str(exc) or "Update download failed."
+                    self.after(
+                        0,
+                        lambda: (
+                            update_status.configure(text=err, text_color=Colors.error),
+                            update_btn.configure(state="normal", text=f"Retry update (v{release.version})"),
+                        )
+                        if dialog.winfo_exists()
+                        else None,
+                    )
+                    return
+
+                def finish_and_restart() -> None:
+                    try:
+                        if dialog.winfo_exists():
+                            dialog.close()
+                        self.lock(navigate=False)
+                        launch_windows_installer(installer_path)
+                        self.controller.destroy()
+                    except Exception as exc:
+                        self.status.configure(text=f"Could not launch installer: {exc}", text_color=Colors.error)
+
+                self.after(0, finish_and_restart)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def on_update_click() -> None:
+            if pending_release[0] is not None:
+                install_update(pending_release[0])
+                return
+            update_btn.configure(state="disabled", text="Checking…")
+            update_status.configure(text=f"Checking GitHub Releases (v{APP_VERSION})…", text_color=Colors.text_sub)
+
+            def worker() -> None:
+                try:
+                    release = check_for_update(APP_VERSION)
+                except Exception as exc:
+                    err = str(exc) or "Could not check for updates."
+                    self.after(
+                        0,
+                        lambda: (
+                            update_status.configure(text=err, text_color=Colors.error),
+                            update_btn.configure(state="normal", text="Check for updates"),
+                        )
+                        if dialog.winfo_exists()
+                        else None,
+                    )
+                    return
+
+                def apply_result() -> None:
+                    if not dialog.winfo_exists():
+                        return
+                    if release is None:
+                        update_status.configure(
+                            text=f"You are on the latest version (v{APP_VERSION}).",
+                            text_color=Colors.success,
+                        )
+                        update_btn.configure(state="normal", text="Check for updates")
+                    else:
+                        pending_release[0] = release
+                        if sys.platform.startswith("win") and release.installer_url:
+                            label = f"Update & Restart (v{release.version})"
+                            msg = f"Version {release.version} is ready to install."
+                        else:
+                            label = f"Download v{release.version}…"
+                            msg = f"Version {release.version} is available on GitHub."
+                        update_status.configure(text=msg, text_color=Colors.primary)
+                        update_btn.configure(state="normal", text=label)
+
+                self.after(0, apply_result)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        update_btn = secondary_button(
+            dialog.body, "Check for updates", on_update_click,
+            image=icon_image("import", 15), compound="left", anchor="w",
+        )
+        update_btn.pack(fill="x", pady=3)
 
         row = dialog.actions()
         primary_button(row, "Done", dialog.close, width=96).pack(side="right")

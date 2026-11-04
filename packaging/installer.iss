@@ -57,7 +57,7 @@ Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"; AppUserModel
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; AppUserModelID: "{#AppUserModelID}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall
 
 ; Encrypted vaults live in %LOCALAPPDATA%\Secure Notes and are deliberately NOT
 ; removed on uninstall, so reinstalling or upgrading never destroys user data.

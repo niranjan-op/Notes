@@ -84,18 +84,53 @@ def _token_from_match(kind: str, match: re.Match, base: int) -> InlineToken:
     return InlineToken("italic" if kind == "italic_u" else kind, start, end, start + marker, end - marker)
 
 
+_INLINE_HINT = re.compile(r"[\\`*_\[\]!~=]|https?://")
+_PATTERN_HINTS: dict[str, tuple[str, ...]] = {
+    "escape": ("\\",),
+    "code": ("`",),
+    "wikilink": ("[[",),
+    "image": ("![",),
+    "link": ("](",),
+    "url": ("http://", "https://"),
+    "bolditalic": ("***", "___"),
+    "bold": ("**", "__"),
+    "strike": ("~~",),
+    "highlight": ("==",),
+    "italic": ("*",),
+    "italic_u": ("_",),
+}
+
+
 def parse_inline(text: str, base: int = 0) -> list[InlineToken]:
     """Tokenise inline Markdown. Offsets are relative to ``base``."""
+    if not text or not _INLINE_HINT.search(text):
+        return []
     tokens: list[InlineToken] = []
     pos = 0
-    while pos < len(text):
-        best: tuple[int, int, str, re.Match] | None = None
-        for priority, (kind, pattern) in enumerate(_INLINE_PATTERNS):
-            match = pattern.search(text, pos)
+    length = len(text)
+    active: list[list] = []
+    for priority, (kind, pattern) in enumerate(_INLINE_PATTERNS):
+        if any(hint in text for hint in _PATTERN_HINTS[kind]):
+            match = pattern.search(text, 0)
             if match and match.end() > match.start():
-                key = (match.start(), priority)
-                if best is None or key < best[:2]:
-                    best = (match.start(), priority, kind, match)
+                active.append([priority, kind, pattern, match])
+
+    while pos < length and active:
+        best: tuple[int, int, str, re.Match] | None = None
+        idx = 0
+        while idx < len(active):
+            entry = active[idx]
+            match = entry[3]
+            if match.start() < pos:
+                match = entry[2].search(text, pos)
+                if match is None or match.end() <= match.start():
+                    active.pop(idx)
+                    continue
+                entry[3] = match
+            key = (match.start(), entry[0])
+            if best is None or key < best[:2]:
+                best = (match.start(), entry[0], entry[1], match)
+            idx += 1
         if best is None:
             break
         token = _token_from_match(best[2], best[3], base)
@@ -186,39 +221,57 @@ def table_alignments(separator: str) -> list[str]:
     return aligns
 
 
+_BLANK_LINE = LineInfo("blank")
+_PARAGRAPH_LINE = LineInfo("paragraph")
+
+
 def analyze(text: str) -> list[LineInfo]:
     """Classify every line of ``text`` (split on \\n)."""
-    lines = text.split("\n")
+    return analyze_lines(text.split("\n"))
+
+
+def analyze_lines(lines: list[str]) -> list[LineInfo]:
+    """Classify a pre-split list of lines."""
     infos: list[LineInfo] = []
     block_id = 0
     index = 0
-    while index < len(lines):
+    total = len(lines)
+    while index < total:
         line = lines[index]
-        fence = FENCE.match(line)
-        if fence:
-            fence_chars = fence.group(1)
-            block_id += 1
-            infos.append(LineInfo("fence", block_id, extra={"lang": fence.group(2), "open": True}))
-            index += 1
-            while index < len(lines):
-                closing = FENCE.match(lines[index])
-                if closing and closing.group(1)[0] == fence_chars[0] and len(closing.group(1)) >= len(fence_chars) \
-                        and not lines[index].strip()[len(closing.group(1)):].strip():
-                    infos.append(LineInfo("fence", block_id, extra={"open": False}))
-                    index += 1
-                    break
-                infos.append(LineInfo("code", block_id))
+        stripped = line.lstrip()
+        if stripped.startswith(("```", "~~~")) and (len(line) - len(stripped) <= 3):
+            fence = FENCE.match(line)
+            if fence:
+                fence_chars = fence.group(1)
+                fc0 = fence_chars[0]
+                fclen = len(fence_chars)
+                block_id += 1
+                infos.append(LineInfo("fence", block_id, extra={"lang": fence.group(2), "open": True}))
                 index += 1
-            continue
+                code_info = LineInfo("code", block_id)
+                while index < total:
+                    cline = lines[index]
+                    cstrip = cline.lstrip()
+                    if cstrip.startswith(fc0 * fclen) and (len(cline) - len(cstrip) <= 3):
+                        closing = FENCE.match(cline)
+                        if closing and closing.group(1)[0] == fc0 and len(closing.group(1)) >= fclen \
+                                and not cstrip[len(closing.group(1)):].strip():
+                            infos.append(LineInfo("fence", block_id, extra={"open": False}))
+                            index += 1
+                            break
+                    infos.append(code_info)
+                    index += 1
+                continue
 
-        if "|" in line and index + 1 < len(lines) and TABLE_SEPARATOR.match(lines[index + 1]) \
-                and ("|" in lines[index + 1] or line.strip().startswith("|")):
+        if "|" in line and index + 1 < total and ("|" in lines[index + 1] or stripped.startswith("|")) \
+                and TABLE_SEPARATOR.match(lines[index + 1]):
             block_id += 1
             infos.append(LineInfo("table_header", block_id))
             infos.append(LineInfo("table_separator", block_id))
             index += 2
-            while index < len(lines) and "|" in lines[index] and lines[index].strip():
-                infos.append(LineInfo("table_row", block_id))
+            row_info = LineInfo("table_row", block_id)
+            while index < total and "|" in lines[index] and lines[index].strip():
+                infos.append(row_info)
                 index += 1
             continue
 
@@ -228,30 +281,51 @@ def analyze(text: str) -> list[LineInfo]:
 
 
 def _classify(line: str) -> LineInfo:
-    if not line.strip():
-        return LineInfo("blank")
-    if HR.match(line):
-        return LineInfo("hr", marker_end=len(line))
-    heading = HEADING.match(line)
-    if heading:
-        return LineInfo("heading", level=len(heading.group(1)), marker_end=heading.end(), content_start=heading.end())
-    quote = QUOTE.match(line)
-    if quote:
-        depth = quote.group(0).count(">")
-        rest = _classify(line[quote.end():])
-        info = LineInfo("quote", level=depth, marker_end=quote.end(), content_start=quote.end())
-        info.extra["inner"] = rest
-        return info
-    item = LIST_ITEM.match(line)
-    if item:
-        indent = len(item.group(1).replace("\t", "    "))
-        info = LineInfo("list", level=indent // 2, marker_end=item.end(3), ordered=item.group(2)[0].isdigit(),
-                        marker=item.group(2), content_start=item.end())
-        if item.group(4):
-            info.task = item.group(5).lower()
-            info.task_range = (item.start(4), item.start(4) + 3)
-        return info
-    return LineInfo("paragraph")
+    stripped = line.lstrip()
+    if not stripped:
+        return _BLANK_LINE
+    first = stripped[0]
+    if first in "-*_":
+        if HR.match(line):
+            return LineInfo("hr", marker_end=len(line))
+        if first != "_":
+            item = LIST_ITEM.match(line)
+            if item:
+                indent = len(item.group(1).replace("\t", "    "))
+                info = LineInfo("list", level=indent // 2, marker_end=item.end(3), ordered=False,
+                                marker=item.group(2), content_start=item.end())
+                if item.group(4):
+                    info.task = item.group(5).lower()
+                    info.task_range = (item.start(4), item.start(4) + 3)
+                return info
+        return _PARAGRAPH_LINE
+    if first == "#":
+        heading = HEADING.match(line)
+        if heading:
+            return LineInfo("heading", level=len(heading.group(1)), marker_end=heading.end(),
+                            content_start=heading.end())
+        return _PARAGRAPH_LINE
+    if first == ">":
+        quote = QUOTE.match(line)
+        if quote:
+            depth = quote.group(0).count(">")
+            rest = _classify(line[quote.end():])
+            info = LineInfo("quote", level=depth, marker_end=quote.end(), content_start=quote.end())
+            info.extra["inner"] = rest
+            return info
+        return _PARAGRAPH_LINE
+    if first == "+" or first.isdigit():
+        item = LIST_ITEM.match(line)
+        if item:
+            indent = len(item.group(1).replace("\t", "    "))
+            info = LineInfo("list", level=indent // 2, marker_end=item.end(3), ordered=first.isdigit(),
+                            marker=item.group(2), content_start=item.end())
+            if item.group(4):
+                info.task = item.group(5).lower()
+                info.task_range = (item.start(4), item.start(4) + 3)
+            return info
+        return _PARAGRAPH_LINE
+    return _PARAGRAPH_LINE
 
 
 def next_list_prefix(line: str) -> tuple[str, bool] | None:

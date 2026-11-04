@@ -216,28 +216,27 @@ def create_db(password: str, name:str):
         # Strategy A: Use Native OS Path
         print(f"Attempting creation with native path: {clean_dir_path}")
         
-        # FIXED: Cast Path object to string because C++ extension expects std::string
         db = ss.DbOperations(str(clean_dir_path))
-        
-        if db.connect(password,name):
-            print("Connection successful! Database created.")
-            # REMOVED: write_config_file(clean_dir_path) 
-            # We rely on create_config/update_config to track vaults in the central config.ini
-            return True
-        else:
-            print("Native path failed. Attempting fallback...")
-            
-            # Strategy B: Force Forward Slashes (Unix Style fallback)
-            fallback_path = str(clean_dir_path).replace("\\", "/")
-            print(f"Attempting creation with fallback path: {fallback_path}")
-            
-            db_retry = ss.DbOperations(fallback_path)
-            if db_retry.connect(password,name):
+        try:
+            if db.connect(password, name):
+                print("Connection successful! Database created.")
+                return True
+        finally:
+            db.close()
+
+        print("Native path failed. Attempting fallback...")
+        fallback_path = str(clean_dir_path).replace("\\", "/")
+        print(f"Attempting creation with fallback path: {fallback_path}")
+        db_retry = ss.DbOperations(fallback_path)
+        try:
+            if db_retry.connect(password, name):
                 print("Fallback connection successful!")
                 return True
-                
-            print("All creation strategies failed.")
-            return False
+        finally:
+            db_retry.close()
+
+        print("All creation strategies failed.")
+        return False
             
     except Exception as e:
         print(f"CRITICAL EXCEPTION during DB creation: {e}")

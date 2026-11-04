@@ -167,6 +167,13 @@ def _draw(name: str, color: str) -> Image.Image:
     elif name == "panel_right":
         pen.rect(3, 4, 21, 20, radius=2.5)
         pen.line((15, 4.5), (15, 19.5))
+    elif name == "book":
+        pen.line((12, 6.5), (12, 19.5))
+        pen.line((12, 6.5), (9.5, 5), (4, 5), (3, 6), (3, 18), (4, 19), (9.5, 19), (12, 20))
+        pen.line((12, 6.5), (14.5, 5), (20, 5), (21, 6), (21, 18), (20, 19), (14.5, 19), (12, 20))
+    elif name == "edit":
+        pen.line((16.5, 3.5), (20.5, 7.5), (8, 20), (3.5, 20.5), (4, 16), closed=True)
+        pen.line((14, 6), (18, 10))
     elif name == "theme":
         pen.circle(12, 12, 8.5)
         pen.pie(3.5, 3.5, 20.5, 20.5, 90, 270)

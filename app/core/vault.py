@@ -219,6 +219,8 @@ class Vault:
 
     @staticmethod
     def links(content: str) -> set[str]:
+        if "[[" not in content and "](" not in content:
+            return set()
         links = set()
         for wiki, markdown in LINK_PATTERN.findall(content):
             target = (wiki or markdown).strip()

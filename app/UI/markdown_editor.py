@@ -24,13 +24,27 @@ import customtkinter as ctk
 from app.core.markdown import (
     InlineToken,
     LineInfo,
-    analyze,
+    analyze_lines,
     next_list_prefix,
     parse_inline,
     split_table_row,
     table_alignments,
 )
 from .styles import MONO_FAMILY, Colors, Fonts, Metrics, resolve
+
+VIEWPORT_FULL_DOC_LIMIT = 400
+VIEWPORT_BUFFER_LINES = 80
+VIEWPORT_CONTEXT_LINES = 60
+MAX_EMBEDDED_TABLE_CELLS = 120
+_STATIC_TAGS = (
+    "md-hide", "md-syntax",
+    "md-h1", "md-h2", "md-h3", "md-h4", "md-h5", "md-h6",
+    "md-bold", "md-italic", "md-bolditalic", "md-strike", "md-highlight",
+    "md-code", "md-wikilink", "md-link", "md-url", "md-image",
+    "md-quote", "md-codeblock", "md-fence", "md-hr-line",
+    "md-task-done", "md-task-checked", "md-task-unchecked", "md-table-raw",
+    *(f"md-list-{i}" for i in range(6)),
+)
 
 
 class MarkdownEditorController:
@@ -49,9 +63,12 @@ class MarkdownEditorController:
         self.on_modified = on_modified
         self.font_family = font_family
         self.live_preview = True  # when False (Source mode), syntax markers are never elided
+        self.reading_mode = False  # when True, editing is disabled and all Markdown is rendered
         self._embedded_widgets: list[tk.Widget] = []
-        self._dynamic_tags: set[str] = set()
         self._render_job: str | None = None
+        self._rendered_range: tuple[int, int] | None = None
+        self._last_scroll_top: int = 1
+        self._is_rendering = False
         self._configure_tags()
         self._bind_events()
 
@@ -64,6 +81,14 @@ class MarkdownEditorController:
     def set_live_preview(self, enabled: bool) -> None:
         self.live_preview = enabled
         self.render()
+
+    def set_reading_mode(self, enabled: bool) -> None:
+        self.reading_mode = enabled
+        self.render()
+        self.widget.configure(
+            state="disabled" if enabled else "normal",
+            insertwidth=0 if enabled else 2,
+        )
 
     def apply_theme(self) -> None:
         self._configure_tags()
@@ -147,6 +172,8 @@ class MarkdownEditorController:
         w.tag_configure("md-fence", font=(MONO_FAMILY, 11), foreground=faint, background=code_bg)
         w.tag_configure("md-hr-line", foreground=resolve(Colors.border), overstrike=True, spacing1=8, spacing3=8)
         w.tag_configure("md-task-done", overstrike=True, foreground=sub)
+        w.tag_configure("md-task-checked", foreground=primary, font=(family, 13, "bold"))
+        w.tag_configure("md-task-unchecked", foreground=sub, font=(family, 13, "bold"))
         w.tag_configure(
             "md-table-raw",
             font=(MONO_FAMILY, 13),
@@ -161,20 +188,37 @@ class MarkdownEditorController:
 
     def _bind_events(self) -> None:
         w = self.widget
-        for seq in ("<KeyRelease>", "<ButtonRelease-1>", "<FocusIn>", "<FocusOut>"):
+        for seq in ("<KeyRelease>", "<ButtonRelease-1>", "<FocusIn>", "<FocusOut>", "<MouseWheel>"):
             w.bind(seq, self.queue_render, add="+")
         w.bind("<Return>", self._on_return)
 
-        for tag in ("md-wikilink", "md-link", "md-url"):
+        orig_yscroll = w.cget("yscrollcommand")
+        if orig_yscroll:
+            def _on_yscroll(*args):
+                self.widget.tk.call(orig_yscroll, *args)
+                if not self._is_rendering:
+                    try:
+                        top_line = int(w.index("@0,0").split(".")[0])
+                        if abs(top_line - self._last_scroll_top) >= 20:
+                            self.queue_render()
+                    except tk.TclError:
+                        pass
+            w.configure(yscrollcommand=_on_yscroll)
+
+        for tag in ("md-wikilink", "md-link", "md-url", "md-task-checked", "md-task-unchecked"):
             w.tag_bind(tag, "<Enter>", lambda _e: w.configure(cursor="hand2"))
             w.tag_bind(tag, "<Leave>", lambda _e: w.configure(cursor="xterm"))
         w.tag_bind("md-wikilink", "<Button-1>", self._click_wikilink)
         w.tag_bind("md-link", "<Button-1>", self._click_external_link)
         w.tag_bind("md-url", "<Button-1>", self._click_external_link)
+        w.tag_bind("md-task-checked", "<Button-1>", self._click_task_checkbox)
+        w.tag_bind("md-task-unchecked", "<Button-1>", self._click_task_checkbox)
 
     # --------------------------------------------------------- smart editing
     def _on_return(self, event) -> str | None:
         """Continue lists/blockquotes/tasks on Enter, or exit an empty item."""
+        if self.reading_mode:
+            return "break"
         if event.state & 0x4:  # Control held
             return None
         w = self.widget
@@ -195,6 +239,8 @@ class MarkdownEditorController:
         return "break"
 
     def _toggle_task(self, line_no: int, start_col: int, end_col: int) -> None:
+        if self.reading_mode:
+            return
         w = self.widget
         current = w.get(f"{line_no}.{start_col}", f"{line_no}.{end_col}")
         replacement = "[ ]" if "x" in current.lower() else "[x]"
@@ -203,6 +249,8 @@ class MarkdownEditorController:
         self.render()
 
     def _focus_line(self, line_no: int, col: int = 0) -> None:
+        if self.reading_mode:
+            return
         self.widget.mark_set("insert", f"{line_no}.{col}")
         self.widget.focus_set()
         self.render()
@@ -244,13 +292,40 @@ class MarkdownEditorController:
             return "break"
         return None
 
+    def _click_task_checkbox(self, event) -> str | None:
+        w = self.widget
+        idx = w.index(f"@{event.x},{event.y}")
+        line_no = int(idx.split(".")[0])
+        line = w.get(f"{line_no}.0", f"{line_no}.end")
+        info = analyze_lines([line])[0]
+        if info.kind == "list" and info.task is not None:
+            t_start, t_end = info.task_range
+            self._toggle_task(line_no, t_start, t_end)
+            return "break"
+        return None
+
     # ------------------------------------------------------------- rendering
+    def reset(self) -> None:
+        """Clear all rendered widgets and tags across the entire document."""
+        if self._render_job:
+            self.widget.after_cancel(self._render_job)
+            self._render_job = None
+        was_disabled = str(self.widget.cget("state")) == "disabled"
+        if was_disabled:
+            self.widget.configure(state="normal")
+        try:
+            self._clear_render_state(1, None)
+            self._rendered_range = None
+        finally:
+            if was_disabled or self.reading_mode:
+                self.widget.configure(state="disabled", insertwidth=0)
+
     def queue_render(self, _event=None) -> None:
         if self._render_job:
             self.widget.after_cancel(self._render_job)
-        self._render_job = self.widget.after(15, self.render)
+        self._render_job = self.widget.after(18, self.render)
 
-    def _clear_render_state(self) -> None:
+    def _clear_render_state(self, start_line: int = 1, end_line: int | None = None) -> None:
         w = self.widget
         for child in self._embedded_widgets:
             try:
@@ -259,58 +334,96 @@ class MarkdownEditorController:
                 pass
         self._embedded_widgets.clear()
 
-        static_tags = (
-            "md-hide", "md-syntax",
-            "md-h1", "md-h2", "md-h3", "md-h4", "md-h5", "md-h6",
-            "md-bold", "md-italic", "md-bolditalic", "md-strike", "md-highlight",
-            "md-code", "md-wikilink", "md-link", "md-url", "md-image",
-            "md-quote", "md-codeblock", "md-fence", "md-hr-line", "md-task-done", "md-table-raw",
-            *(f"md-list-{i}" for i in range(6)),
-        )
-        for tag in static_tags:
-            w.tag_remove(tag, "1.0", "end")
-        for tag in list(self._dynamic_tags):
-            w.tag_delete(tag)
-        self._dynamic_tags.clear()
+        start_idx = f"{max(1, start_line)}.0"
+        end_idx = f"{end_line}.end" if end_line is not None else "end"
+        for tag in _STATIC_TAGS:
+            w.tag_remove(tag, start_idx, end_idx)
 
     def render(self, _event=None) -> None:
         if self._render_job:
             self.widget.after_cancel(self._render_job)
             self._render_job = None
-        w = self.widget
-        self._clear_render_state()
+        if self._is_rendering:
+            return
+        self._is_rendering = True
+        if self.reading_mode:
+            self.widget.configure(state="normal")
+        try:
+            self._render_viewport()
+        finally:
+            if self.reading_mode:
+                self.widget.configure(state="disabled", insertwidth=0)
+            self._is_rendering = False
 
-        raw = w.get("1.0", "end-1c")
+    def _render_viewport(self) -> None:
+        w = self.widget
+        if w.compare("end-1c", "==", "1.0"):
+            if self._rendered_range is not None:
+                self._clear_render_state(*self._rendered_range)
+                self._rendered_range = None
+            return
+
+        total_lines = int(w.index("end-1c").split(".")[0])
+        if total_lines <= VIEWPORT_FULL_DOC_LIMIT:
+            win_start = ctx_start = 1
+            win_end = ctx_end = total_lines
+            self._last_scroll_top = 1
+        else:
+            first_vis = int(w.index("@0,0").split(".")[0])
+            height = max(w.winfo_height(), 1)
+            last_vis = int(w.index(f"@0,{height}").split(".")[0])
+            if last_vis < first_vis:
+                last_vis = min(total_lines, first_vis + 50)
+            self._last_scroll_top = first_vis
+            win_start = max(1, first_vis - VIEWPORT_BUFFER_LINES)
+            win_end = min(total_lines, max(last_vis + VIEWPORT_BUFFER_LINES, win_start + 160))
+            ctx_start = max(1, win_start - VIEWPORT_CONTEXT_LINES)
+            ctx_end = min(total_lines, win_end + VIEWPORT_CONTEXT_LINES)
+
+        if self._rendered_range is not None:
+            prev_start, prev_end = self._rendered_range
+            self._clear_render_state(min(prev_start, ctx_start), max(prev_end, ctx_end))
+        else:
+            self._clear_render_state(ctx_start, ctx_end)
+        self._rendered_range = (ctx_start, ctx_end)
+
+        raw = w.get(f"{ctx_start}.0", f"{ctx_end}.end")
         if not raw:
             return
         lines = raw.split("\n")
-        infos = analyze(raw)
+        infos = analyze_lines(lines)
 
         has_focus = w.focus_displayof() is w
         active_line = int(w.index("insert").split(".")[0]) if has_focus else -1
-        # If there is an active text selection, keep all selected lines un-elided for clean copy/edit.
-        sel_lines: set[int] = set()
+        sel_range: tuple[int, int] | None = None
         if w.tag_ranges("sel"):
             s_line = int(w.index("sel.first").split(".")[0])
             e_line = int(w.index("sel.last").split(".")[0])
-            sel_lines = set(range(s_line, e_line + 1))
+            sel_range = (s_line, e_line)
 
         active_block = -1
-        if 1 <= active_line <= len(infos):
-            active_block = infos[active_line - 1].block
+        if ctx_start <= active_line <= ctx_start + len(infos) - 1:
+            active_block = infos[active_line - ctx_start].block
 
-        # Group contiguous table blocks
+        # Group contiguous table blocks inside the context slice
         tables: dict[int, list[int]] = {}
-        for idx, info in enumerate(infos, 1):
+        for offset, info in enumerate(infos):
             if info.kind in {"table_header", "table_separator", "table_row"}:
-                tables.setdefault(info.block, []).append(idx)
+                tables.setdefault(info.block, []).append(ctx_start + offset)
 
         rendered_tables: set[int] = set()
 
-        for line_no, (line, info) in enumerate(zip(lines, infos), 1):
-            is_active = (not self.live_preview) or (line_no == active_line) or (line_no in sel_lines) or (
-                info.block != -1 and info.block == active_block
-            )
+        for offset, (line, info) in enumerate(zip(lines, infos)):
+            line_no = ctx_start + offset
+            if line_no < win_start or line_no > win_end:
+                continue
+            if self.reading_mode:
+                is_active = False
+            else:
+                in_sel = sel_range is not None and sel_range[0] <= line_no <= sel_range[1]
+                is_active = (not self.live_preview) or (line_no == active_line) or in_sel or (
+                    info.block != -1 and info.block == active_block
+                )
 
             # 1. Fenced code block
             if info.kind == "fence":
@@ -331,7 +444,7 @@ class MarkdownEditorController:
                 else:
                     if info.block not in rendered_tables:
                         rendered_tables.add(info.block)
-                        self._render_table_block(tables[info.block], lines)
+                        self._render_table_block(tables[info.block], lines, ctx_start)
                 continue
 
             # 3. Horizontal rule
@@ -387,20 +500,7 @@ class MarkdownEditorController:
 
     def _render_task_checkbox(self, line_no: int, start: int, end: int, checked: bool, is_active: bool) -> None:
         w = self.widget
-        tag = f"md-task-{line_no}"
-        self._dynamic_tags.add(tag)
-        w.tag_configure(
-            tag,
-            foreground=resolve(Colors.primary) if checked else resolve(Colors.text_sub),
-            font=(self.font_family, 13, "bold"),
-        )
-        w.tag_bind(tag, "<Enter>", lambda _e: w.configure(cursor="hand2"))
-        w.tag_bind(tag, "<Leave>", lambda _e: w.configure(cursor="xterm"))
-        w.tag_bind(
-            tag,
-            "<Button-1>",
-            lambda _e, ln=line_no, s=start, e=end: (self._toggle_task(ln, s, e), "break")[1],
-        )
+        tag = "md-task-checked" if checked else "md-task-unchecked"
         w.tag_add(tag, f"{line_no}.{start}", f"{line_no}.{end}")
         if not is_active:
             # Hide the outer brackets [ and ] so only the check state stands out cleanly.
@@ -435,20 +535,24 @@ class MarkdownEditorController:
                 self._apply_tokens(line_no, list(tok.children), is_active)
 
     # --------------------------------------------------------- table widgets
-    def _render_table_block(self, line_numbers: list[int], all_lines: list[str]) -> None:
+    def _render_table_block(self, line_numbers: list[int], ctx_lines: list[str], ctx_start: int = 1) -> None:
         """Render a GFM table as a styled grid widget and elide the raw pipe lines."""
         if len(line_numbers) < 2:
             return
         w = self.widget
         first_line = line_numbers[0]
         last_line = line_numbers[-1]
-        header_line = all_lines[first_line - 1]
-        sep_line = all_lines[first_line]
-        body_lines = [all_lines[ln - 1] for ln in line_numbers[2:]]
+        header_line = ctx_lines[first_line - ctx_start]
+        sep_line = ctx_lines[first_line - ctx_start + 1]
+        body_lines = [ctx_lines[ln - ctx_start] for ln in line_numbers[2:]]
 
         aligns = table_alignments(sep_line)
         header_ranges = split_table_row(header_line)
         col_count = max(len(aligns), len(header_ranges), 1)
+        if (len(body_lines) + 1) * col_count > MAX_EMBEDDED_TABLE_CELLS:
+            for ln in line_numbers:
+                w.tag_add("md-table-raw", f"{ln}.0", f"{ln}.end")
+            return
         while len(aligns) < col_count:
             aligns.append("left")
 

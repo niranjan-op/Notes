@@ -33,13 +33,15 @@ jobs:
           python -m unittest discover -s tests
           python -m PyInstaller --noconfirm --clean NotesApp.spec
           if (-not (Test-Path dist\NotesApp\_internal\PIL)) { throw 'Pillow missing from bundle' }
-          iscc packaging\installer.iss
+          $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          iscc "/DAppVersion=$version" packaging\installer.iss
+          Copy-Item "dist\installer\*.exe" -Destination .
           Compress-Archive -Path dist\NotesApp\* -DestinationPath NotesApp-windows-x64.zip
       - uses: actions/upload-artifact@v4
         with:
           name: windows
           path: |
-            dist/installer/*.exe
+            SecureNotes-Setup-*-x64.exe
             NotesApp-windows-x64.zip
 
   linux:
@@ -154,4 +156,6 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          files: release/*
+          files: |
+            release/*
+            release/dist/installer/*.exe
