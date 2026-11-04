@@ -24,8 +24,8 @@ _SUPERSAMPLE = 8          # draw at 192px, store at 64px
 _STORE_SIZE = 64
 _STROKE = 1.75
 
-# (light-mode colour, dark-mode colour) per tone.
-_TONES = {
+# (light-mode colour, dark-mode colour) per tone for each colour theme.
+_DEFAULT_TONES = {
     "muted": ("#52525B", "#A1A1AA"),
     "faint": ("#A1A1AA", "#6B6B73"),
     "strong": ("#18181B", "#E8E8EB"),
@@ -34,6 +34,20 @@ _TONES = {
     "on_primary": ("#FFFFFF", "#FFFFFF"),
 }
 
+_MONO_TONES = {
+    "muted": ("#404040", "#B8B8B8"),
+    "faint": ("#8A8A8A", "#6E6E6E"),
+    "strong": ("#000000", "#FFFFFF"),
+    "primary": ("#000000", "#FFFFFF"),
+    "danger": ("#000000", "#FFFFFF"),
+    "on_primary": ("#FFFFFF", "#000000"),
+}
+
+_TONES = dict(_DEFAULT_TONES)
+_mono_active = False
+_icon_registry: list[tuple[ctk.CTkImage, str, str]] = []
+_logo_registry: list[ctk.CTkImage] = []
+
 
 def asset_path(name: str) -> Path:
     """Return a bundled asset path in source and packaged builds."""
@@ -41,10 +55,45 @@ def asset_path(name: str) -> Path:
     return root / "assets" / name
 
 
+def _draw_mark_image(badge: tuple[int, int, int, int], page: tuple[int, int, int, int],
+                     fold_color: tuple[int, int, int, int], size: tuple[int, int]) -> Image.Image:
+    canvas = 1024
+    img = Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.rounded_rectangle((0, 0, canvas - 1, canvas - 1), radius=230, fill=badge)
+    left, top, right, bottom, fold = 262, 176, 762, 848, 150
+    draw.polygon(
+        [(left, top), (right - fold, top), (right, top + fold), (right, bottom), (left, bottom)],
+        fill=page,
+    )
+    draw.polygon([(right - fold, top), (right - fold, top + fold), (right, top + fold)], fill=fold_color)
+    cx, cy = (left + right) // 2, 470
+    draw.ellipse((cx - 78, cy - 78, cx + 78, cy + 78), fill=badge)
+    draw.polygon([(cx - 44, cy + 30), (cx + 44, cy + 30), (cx + 70, cy + 230), (cx - 70, cy + 230)], fill=badge)
+    draw.rounded_rectangle((left + 90, 752, right - 90, 784), radius=16, fill=fold_color)
+    return img.resize(size, Image.Resampling.LANCZOS)
+
+
+@lru_cache(maxsize=1)
+def _brand_logos() -> tuple[Image.Image, Image.Image, Image.Image]:
+    """Return (default_logo, mono_light_logo, mono_dark_logo) at identical dimensions."""
+    default_img = Image.open(asset_path("notes.png")).convert("RGBA")
+    mono_light = _draw_mark_image((0, 0, 0, 255), (255, 255, 255, 255), (180, 180, 180, 255), default_img.size)
+    mono_dark = _draw_mark_image((255, 255, 255, 255), (0, 0, 0, 255), (110, 110, 110, 255), default_img.size)
+    return default_img, mono_light, mono_dark
+
+
+@lru_cache(maxsize=16)
 def logo_image(size: int) -> ctk.CTkImage:
     """Return the Secure Notes brand mark scaled for CustomTkinter."""
-    image = Image.open(asset_path("notes.png")).convert("RGBA")
-    return ctk.CTkImage(light_image=image, dark_image=image, size=(size, size))
+    default_img, mono_light, mono_dark = _brand_logos()
+    img = ctk.CTkImage(
+        light_image=mono_light if _mono_active else default_img,
+        dark_image=mono_dark if _mono_active else default_img,
+        size=(size, size),
+    )
+    _logo_registry.append(img)
+    return img
 
 
 class _Pen:
@@ -112,6 +161,7 @@ def _gear(pen: _Pen) -> None:
     pen.circle(12, 12, 2.8)
 
 
+@lru_cache(maxsize=256)
 def _draw(name: str, color: str) -> Image.Image:
     pen = _Pen(color)
     if name == "chevron_right":
@@ -197,4 +247,24 @@ def _draw(name: str, color: str) -> Image.Image:
 def icon_image(name: str, size: int = 18, tone: str = "muted") -> ctk.CTkImage:
     """Return a cached, theme-aware line icon."""
     light, dark = _TONES[tone]
-    return ctk.CTkImage(light_image=_draw(name, light), dark_image=_draw(name, dark), size=(size, size))
+    img = ctk.CTkImage(light_image=_draw(name, light), dark_image=_draw(name, dark), size=(size, size))
+    _icon_registry.append((img, name, tone))
+    return img
+
+
+def sync_brand_palette(is_mono: bool) -> None:
+    """Switch cached brand icons and logos between Default and Monochrome palettes."""
+    global _mono_active
+    _mono_active = is_mono
+    active_tones = _MONO_TONES if is_mono else _DEFAULT_TONES
+    _TONES.update(active_tones)
+    for img, name, tone in _icon_registry:
+        light, dark = _TONES[tone]
+        img.configure(light_image=_draw(name, light), dark_image=_draw(name, dark))
+    if _logo_registry:
+        default_img, mono_light, mono_dark = _brand_logos()
+        for logo in _logo_registry:
+            logo.configure(
+                light_image=mono_light if is_mono else default_img,
+                dark_image=mono_dark if is_mono else default_img,
+            )

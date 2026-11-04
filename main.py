@@ -9,7 +9,7 @@ from app.UI.components import set_window_icon
 from app.UI.login_view import LoginView
 from app.UI.main_view import MainView
 from app.UI.setup_view import SetupView
-from app.UI.styles import Colors
+from app.UI.styles import Colors, apply_color_theme
 from app.UI.welcome_view import WelcomeView
 
 
@@ -76,6 +76,7 @@ def _initial_theme() -> str:
 
 if __name__ == "__main__":
     _register_windows_app_id()
+    apply_color_theme(cf.get_preference("color_theme", "default"))
     ctk.set_appearance_mode(_initial_theme())
     app = MainApp()
     app.mainloop()

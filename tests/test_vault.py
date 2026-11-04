@@ -212,5 +212,65 @@ class UpdaterTests(unittest.TestCase):
         self.assertIsNone(release_from_payload(payload, "1.4.0"))
 
 
+class ThemeTests(unittest.TestCase):
+    def tearDown(self):
+        import customtkinter as ctk
+        from app.UI.styles import apply_color_theme
+        apply_color_theme("default")
+        ctk.set_appearance_mode("dark")
+
+    def test_default_and_monochrome_themes_with_independent_light_dark_toggle(self):
+        import customtkinter as ctk
+        from app.UI.brand import _TONES, logo_image
+        from app.UI.styles import Colors, _DEFAULT_PALETTE, apply_color_theme, current_color_theme, resolve
+
+        logo = logo_image(22)
+
+        # 1. Default theme (built-in indigo palette) with Light and Dark toggle
+        self.assertEqual(apply_color_theme("Default"), "default")
+        self.assertEqual(current_color_theme(), "default")
+        ctk.set_appearance_mode("light")
+        self.assertEqual(resolve(Colors.bg), "#FFFFFF")
+        self.assertEqual(resolve(Colors.primary), "#4F46E5")
+        ctk.set_appearance_mode("dark")
+        self.assertEqual(resolve(Colors.bg), "#161618")
+        self.assertEqual(resolve(Colors.primary), "#6366F1")
+        default_logo_light = logo.cget("light_image")
+
+        # 2. Monochrome theme (black & white) with independent Light and Dark toggle
+        self.assertEqual(apply_color_theme("Monochrome"), "monochrome")
+        self.assertEqual(current_color_theme(), "monochrome")
+
+        for name in _DEFAULT_PALETTE:
+            pair = getattr(Colors, name)
+            self.assertEqual(len(pair), 2, name)
+            for hex_val in pair:
+                r, g, b = hex_val[1:3], hex_val[3:5], hex_val[5:7]
+                self.assertTrue(r == g == b, f"{name} ({hex_val}) is not pure black/white/grayscale")
+
+        for tone_name, pair in _TONES.items():
+            for hex_val in pair:
+                r, g, b = hex_val[1:3], hex_val[3:5], hex_val[5:7]
+                self.assertTrue(r == g == b, f"Icon tone {tone_name} ({hex_val}) is not monochrome")
+
+        # Light mode in Monochrome
+        ctk.set_appearance_mode("light")
+        self.assertEqual(resolve(Colors.bg), "#FFFFFF")
+        self.assertEqual(resolve(Colors.text), "#000000")
+        self.assertEqual(resolve(Colors.primary), "#000000")
+        self.assertEqual(resolve(Colors.on_primary), "#FFFFFF")
+        self.assertEqual(current_color_theme(), "monochrome")
+
+        # Dark mode in Monochrome
+        ctk.set_appearance_mode("dark")
+        self.assertEqual(resolve(Colors.bg), "#000000")
+        self.assertEqual(resolve(Colors.text), "#FFFFFF")
+        self.assertEqual(resolve(Colors.primary), "#FFFFFF")
+        self.assertEqual(resolve(Colors.on_primary), "#000000")
+        self.assertEqual(current_color_theme(), "monochrome")
+        self.assertIsNot(logo.cget("light_image"), default_logo_light)
+        self.assertIsNot(logo.cget("light_image"), logo.cget("dark_image"))
+
+
 if __name__ == "__main__":
     unittest.main()

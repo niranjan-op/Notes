@@ -22,7 +22,16 @@ from .components import (
     Dialog, confirm, field_label, icon_button, primary_button, secondary_button, text_entry,
 )
 from .markdown_editor import MarkdownEditorController
-from .styles import Colors, Fonts, Metrics, resolve
+from .styles import (
+    COLOR_THEME_LABELS,
+    Colors,
+    Fonts,
+    Metrics,
+    apply_color_theme,
+    color_theme_label,
+    current_color_theme,
+    resolve,
+)
 
 EDITOR_FONTS = ("Segoe UI", "Cascadia Mono", "Georgia")
 AUTOSAVE_DELAY_MS = 650
@@ -203,7 +212,8 @@ class MainView(ctk.CTkFrame):
         ctk.CTkLabel(self.context_panel, text="BACKLINKS", font=Fonts.section, text_color=Colors.text_faint,
                      anchor="w").grid(row=0, column=0, sticky="ew", padx=18, pady=(20, 8))
         self.side = ctk.CTkScrollableFrame(self.context_panel, fg_color="transparent", corner_radius=0,
-                                           scrollbar_button_color=Colors.border)
+                                           scrollbar_button_color=Colors.border,
+                                           scrollbar_button_hover_color=Colors.text_faint)
         self.side.grid(row=1, column=0, sticky="nsew", padx=(6, 0), pady=(0, 8))
 
     # -------------------------------------------------------------- shortcuts
@@ -962,6 +972,11 @@ class MainView(ctk.CTkFrame):
         cf.set_preference("theme", value.lower())
         self.after(20, self._apply_editor_theme)
 
+    def change_color_theme(self, value: str) -> None:
+        palette = apply_color_theme(value)
+        cf.set_preference("color_theme", palette)
+        self.after(20, self._apply_editor_theme)
+
     def change_editor_font(self, family: str) -> None:
         self._editor_family = family
         self.editor.configure(font=(family, 15))
@@ -985,10 +1000,20 @@ class MainView(ctk.CTkFrame):
 
         section("APPEARANCE")
         field_label(dialog.body, "Theme").pack(fill="x", pady=(0, 4))
+        color_theme = ctk.CTkSegmentedButton(
+            dialog.body, values=list(COLOR_THEME_LABELS), command=self.change_color_theme, height=32,
+            corner_radius=Metrics.radius, font=Fonts.body, fg_color=Colors.sidebar,
+            selected_color=Colors.selected, selected_hover_color=Colors.active,
+            unselected_color=Colors.sidebar, unselected_hover_color=Colors.hover, text_color=Colors.text,
+        )
+        color_theme.set(color_theme_label(cf.get_preference("color_theme", current_color_theme())))
+        color_theme.pack(fill="x")
+
+        field_label(dialog.body, "Appearance").pack(fill="x", pady=(12, 4))
         theme = ctk.CTkSegmentedButton(
             dialog.body, values=["Light", "Dark", "System"], command=self.change_theme, height=32,
             corner_radius=Metrics.radius, font=Fonts.body, fg_color=Colors.sidebar,
-            selected_color=Colors.primary, selected_hover_color=Colors.primary_hover,
+            selected_color=Colors.selected, selected_hover_color=Colors.active,
             unselected_color=Colors.sidebar, unselected_hover_color=Colors.hover, text_color=Colors.text,
         )
         saved_theme = cf.get_preference("theme", ctk.get_appearance_mode().lower()).capitalize()

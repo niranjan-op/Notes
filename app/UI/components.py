@@ -79,7 +79,8 @@ def primary_button(parent, text: str, command: Callable[[], None], **kwargs) -> 
     return ctk.CTkButton(
         parent, text=text, command=command, height=kwargs.pop("height", Metrics.button_height),
         corner_radius=Metrics.radius, font=Fonts.body_bold, fg_color=Colors.primary,
-        hover_color=Colors.primary_hover, text_color=Colors.on_primary, **kwargs,
+        hover_color=Colors.primary_hover, text_color=Colors.on_primary,
+        text_color_disabled=Colors.text_faint, **kwargs,
     )
 
 
@@ -87,7 +88,8 @@ def secondary_button(parent, text: str, command: Callable[[], None], **kwargs) -
     return ctk.CTkButton(
         parent, text=text, command=command, height=kwargs.pop("height", Metrics.button_height),
         corner_radius=Metrics.radius, font=Fonts.body, fg_color="transparent", border_width=1,
-        border_color=Colors.border, hover_color=Colors.hover, text_color=Colors.text, **kwargs,
+        border_color=Colors.border, hover_color=Colors.hover, text_color=Colors.text,
+        text_color_disabled=Colors.text_faint, **kwargs,
     )
 
 
@@ -95,7 +97,8 @@ def danger_button(parent, text: str, command: Callable[[], None], **kwargs) -> c
     return ctk.CTkButton(
         parent, text=text, command=command, height=kwargs.pop("height", Metrics.button_height),
         corner_radius=Metrics.radius, font=Fonts.body_bold, fg_color=Colors.danger,
-        hover_color=Colors.danger_hover, text_color=Colors.on_primary, **kwargs,
+        hover_color=Colors.danger_hover, text_color=Colors.on_primary,
+        text_color_disabled=Colors.text_faint, **kwargs,
     )
 
 
