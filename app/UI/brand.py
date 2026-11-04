@@ -16,7 +16,7 @@ import customtkinter as ctk
 from PIL import Image, ImageDraw
 
 APP_NAME = "Secure Notes"
-APP_VERSION = "1.3.0"   # keep in sync with packaging/installer.iss and packaging/version_info.txt
+APP_VERSION = "1.4.0"   # keep in sync with packaging/installer.iss and packaging/version_info.txt
 APP_USER_MODEL_ID = "SecureNotes.Desktop.App"
 
 _GRID = 24
