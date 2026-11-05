@@ -49,6 +49,9 @@ class LoginView(ctk.CTkFrame):
 
     def update_view(self, context=None) -> None:
         self.vault_name = (context or {}).get("vault_name")
+        if self.vault_name and cf.is_filesystem_vault(self.vault_name):
+            self.controller.show_frame("MainView", context={"vault_name": self.vault_name, "password": ""})
+            return
         self.header_label.configure(text=f"Unlock {self.vault_name}" if self.vault_name else "Unlock vault")
         self.warning_label.configure(text="")
         self.password.clear()

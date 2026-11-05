@@ -48,6 +48,7 @@ _EMPHASIS = {"bold", "italic", "bolditalic", "strike", "highlight"}
 _INLINE_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("escape", re.compile(r"\\([\\`*_{}\[\]()#+\-.!|~=>])")),
     ("code", re.compile(r"(`+)(?!`)(.+?)(?<!`)\1(?!`)")),
+    ("wikiimage", re.compile(r"!\[\[([^\]|#\n]+)(?:\|([^\]\n]+))?\]\]")),
     ("wikilink", re.compile(r"\[\[([^\]|#\n]+)(#[^\]|\n]*)?(?:\|([^\]\n]+))?\]\]")),
     ("image", re.compile(r"!\[([^\]\n]*)\]\(([^)\s]+)(?:\s+\"[^\"\n]*\")?\)")),
     ("link", re.compile(r"\[([^\]\n]+)\]\(([^)\s]+)(?:\s+\"[^\"\n]*\")?\)")),
@@ -68,6 +69,12 @@ def _token_from_match(kind: str, match: re.Match, base: int) -> InlineToken:
     if kind == "code":
         ticks = len(match.group(1))
         return InlineToken("code", start, end, start + ticks, end - ticks)
+    if kind == "wikiimage":
+        target = match.group(1).strip()
+        if match.group(2):
+            alias_start = match.start(2) + base
+            return InlineToken("image", start, end, alias_start, alias_start + len(match.group(2)), target)
+        return InlineToken("image", start, end, start + 3, match.end(1) + base, target)
     if kind == "wikilink":
         target = match.group(1).strip()
         if match.group(3):
@@ -88,6 +95,7 @@ _INLINE_HINT = re.compile(r"[\\`*_\[\]!~=]|https?://")
 _PATTERN_HINTS: dict[str, tuple[str, ...]] = {
     "escape": ("\\",),
     "code": ("`",),
+    "wikiimage": ("![[",),
     "wikilink": ("[[",),
     "image": ("![",),
     "link": ("](",),

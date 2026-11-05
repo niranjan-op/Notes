@@ -16,12 +16,12 @@ import customtkinter as ctk
 
 import app.core.config as cf
 from app.core.updater import ReleaseInfo, check_for_update, download_installer, launch_windows_installer
-from app.core.vault import DuplicateNameError, Note, Vault, safe_filename
+from app.core.vault import IMAGE_EXTENSIONS, DuplicateNameError, Note, Vault, safe_filename
 from .brand import APP_VERSION, icon_image, logo_image
 from .components import (
     Dialog, confirm, field_label, icon_button, primary_button, secondary_button, text_entry,
 )
-from .markdown_editor import MarkdownEditorController
+from .markdown_editor import MarkdownEditorController, load_image_file
 from .styles import (
     COLOR_THEME_LABELS,
     Colors,
@@ -46,6 +46,8 @@ WELCOME_BODY = (
     "| `Ctrl+N` | New note |\n"
     "| `Ctrl+Shift+N` | New folder |\n"
     "| `Ctrl+F` | Search |\n"
+    "| `Ctrl+V` | Paste text, images or animated GIFs |\n"
+    "| `Ctrl+Shift+I` | Insert image or GIF from disk |\n"
     "| `Ctrl+E` | Toggle Live Preview / Source |\n"
     "| `Ctrl+R` | Toggle Reading / Editing mode |\n"
     "| `Ctrl+L` | Lock vault |\n\n"
@@ -158,14 +160,18 @@ class MainView(ctk.CTkFrame):
         self.breadcrumb.grid(row=0, column=0, sticky="ew")
         self.status = ctk.CTkLabel(bar, text="", font=Fonts.small, text_color=Colors.text_faint)
         self.status.grid(row=0, column=1, padx=(8, 8))
+        self.insert_image_button = icon_button(
+            bar, "image", self.insert_image_dialog, "Insert image or GIF  (Ctrl+Shift+I)"
+        )
+        self.insert_image_button.grid(row=0, column=2, padx=(0, 2))
         self.delete_button = icon_button(bar, "trash", self.delete_current_note, "Delete note")
-        self.delete_button.grid(row=0, column=2)
+        self.delete_button.grid(row=0, column=3)
         self.reading_mode_button = icon_button(
             bar, "book", self.toggle_reading_mode, "Toggle reading mode  (Ctrl+R)"
         )
-        self.reading_mode_button.grid(row=0, column=3, padx=(2, 0))
+        self.reading_mode_button.grid(row=0, column=4, padx=(2, 0))
         icon_button(bar, "panel_right", self.toggle_context_panel, "Toggle backlinks panel").grid(
-            row=0, column=4, padx=(2, 0))
+            row=0, column=5, padx=(2, 0))
 
         self.title = ctk.CTkEntry(center, placeholder_text="Untitled", font=Fonts.title, border_width=0,
                                   fg_color="transparent", text_color=Colors.text,
@@ -189,7 +195,10 @@ class MainView(ctk.CTkFrame):
             on_open_wikilink=self._open_wikilink_target,
             on_modified=self.queue_save,
             font_family=self._editor_family,
+            resolve_image=self._resolve_image_bytes,
+            on_paste_image=self._store_pasted_image,
         )
+        text.bind("<Button-3>", self._show_editor_context_menu)
         self.editor.bind("<KeyRelease>", self.queue_save)
         self.editor.bind("<KeyRelease>", self._update_empty_hint, add="+")
         self.editor.bind("<Control-s>", self.save)
@@ -223,6 +232,7 @@ class MainView(ctk.CTkFrame):
             "<Control-n>": self.new_note,
             "<Control-N>": lambda: self.new_folder(),
             "<Control-f>": self._focus_search,
+            "<Control-I>": self.insert_image_dialog,
             "<Control-e>": self.toggle_editor_mode,
             "<Control-r>": self.toggle_reading_mode,
             "<Control-l>": self.lock,
@@ -289,7 +299,7 @@ class MainView(ctk.CTkFrame):
         if self.vault:
             self.lock(navigate=False)
         try:
-            self.vault = Vault(context["vault_name"], context["password"])
+            self.vault = Vault(context["vault_name"], context.get("password", ""))
         except (KeyError, ValueError):
             self.vault = None
             self.controller.show_frame("WelcomeView")
@@ -330,6 +340,7 @@ class MainView(ctk.CTkFrame):
         self._note_links.clear()
         self.set_reading_mode(False, announce=False)
         self.md_controller.reset()
+        self.md_controller.clear_media_cache()
         self._set_title_text("")
         self._set_editor_text("")
         self.search.delete(0, "end")
@@ -815,7 +826,8 @@ class MainView(ctk.CTkFrame):
         if self._save_job:
             self.after_cancel(self._save_job)
         self._save_job = self.after(AUTOSAVE_DELAY_MS, self.save)
-        self.status.configure(text="Editing…", text_color=Colors.text_faint)
+        if self.status.cget("text") != "Editing…":
+            self.status.configure(text="Editing…", text_color=Colors.text_faint)
 
     def _cancel_save(self) -> None:
         if self._save_job:
@@ -858,12 +870,16 @@ class MainView(ctk.CTkFrame):
 
     # ------------------------------------------------------------- markdown
     def _update_empty_hint(self, _event=None) -> None:
-        if (
+        should_hide = bool(
             self.note_id is None
             or self.md_controller.reading_mode
             or self.editor._textbox.compare("end-1c", ">", "1.200")
             or self.editor.get("1.0", "1.200").strip()
-        ):
+        )
+        if getattr(self, "_empty_hint_hidden", None) == should_hide:
+            return
+        self._empty_hint_hidden = should_hide
+        if should_hide:
             self.empty_hint.place_forget()
         else:
             self.empty_hint.place(relx=0.5, rely=0.3, anchor="center")
@@ -903,6 +919,91 @@ class MainView(ctk.CTkFrame):
                 self.status.configure(text="Reading mode", text_color=Colors.primary)
             else:
                 self.status.configure(text="Editing", text_color=Colors.text_faint)
+
+    def _resolve_image_bytes(self, target: str) -> bytes | None:
+        if not self.vault:
+            return None
+        return self.vault.get_attachment(target)
+
+    def _store_pasted_image(self, raw_bytes: bytes, ext: str, name_hint: str) -> str | None:
+        if not self.vault or self.note_id is None:
+            return None
+        try:
+            rel_path = self.vault.save_attachment(raw_bytes, ext, name_hint)
+        except (OSError, ValueError) as exc:
+            self.status.configure(text=f"Could not save image: {exc}", text_color=Colors.error)
+            return None
+        kind_label = "GIF" if ext.lower() == ".gif" else "image"
+        self.status.configure(text=f"Pasted {kind_label}", text_color=Colors.text_faint)
+        return rel_path
+
+    def insert_image_dialog(self) -> None:
+        """Open a file picker to insert one or more images or animated GIFs into the current note."""
+        if not self.vault or self.note_id is None or self.md_controller.reading_mode:
+            return
+        paths = filedialog.askopenfilenames(
+            parent=self.winfo_toplevel(),
+            title="Insert image or GIF",
+            filetypes=[
+                ("Images & GIFs", "*.png *.jpg *.jpeg *.gif *.webp *.bmp"),
+                ("Animated GIF", "*.gif"),
+                ("PNG / JPEG / WebP", "*.png *.jpg *.jpeg *.webp *.bmp"),
+            ],
+        )
+        if not paths:
+            return
+        inserted = 0
+        for raw_path in paths:
+            try:
+                raw_bytes, ext, stem = load_image_file(raw_path)
+            except (OSError, ValueError) as exc:
+                self.status.configure(text=f"Could not read image: {exc}", text_color=Colors.error)
+                continue
+            if self.md_controller.insert_image_bytes(raw_bytes, ext, stem, render_now=False):
+                inserted += 1
+        if inserted:
+            self._update_empty_hint()
+            self.md_controller.render()
+            self.queue_save()
+            self.editor.focus_set()
+
+    def _show_editor_context_menu(self, event) -> str:
+        if not self.vault or self.note_id is None:
+            return "break"
+        tb = self.editor._textbox
+        has_sel = bool(tb.tag_ranges("sel"))
+        readonly = self.md_controller.reading_mode
+        menu = tk.Menu(
+            self,
+            tearoff=0,
+            bg=resolve(Colors.card),
+            fg=resolve(Colors.text),
+            activebackground=resolve(Colors.selected),
+            activeforeground=resolve(Colors.text),
+            bd=0,
+            relief="flat",
+            font=Fonts.body,
+        )
+        if not readonly:
+            menu.add_command(
+                label="Cut",
+                state="normal" if has_sel else "disabled",
+                command=lambda: tb.event_generate("<<Cut>>"),
+            )
+        menu.add_command(
+            label="Copy",
+            state="normal" if has_sel else "disabled",
+            command=lambda: tb.event_generate("<<Copy>>"),
+        )
+        if not readonly:
+            menu.add_command(label="Paste", command=lambda: tb.event_generate("<<Paste>>"))
+            menu.add_separator()
+            menu.add_command(label="Insert image or GIF…", command=self.insert_image_dialog)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
 
     def _open_wikilink_target(self, raw_target: str) -> None:
         """Open the vault note targeted by a clicked wiki link."""
@@ -1225,9 +1326,17 @@ class MainView(ctk.CTkFrame):
         root = Path(location)
         sources = sorted(path for path in root.rglob("*")
                          if path.is_file() and path.suffix.lower() in {".md", ".markdown", ".txt"})
-        if not sources:
+        images = sorted(path for path in root.rglob("*")
+                        if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS)
+        if not sources and not images:
             self.status.configure(text="No Markdown or text files in that folder.", text_color=Colors.text_faint)
             return
+        for img_path in images:
+            try:
+                raw_bytes, ext, stem = load_image_file(img_path)
+                self.vault.save_attachment(raw_bytes, ext, stem)
+            except (OSError, ValueError):
+                continue
         base = self._target_folder()
         folders = {(folder.parent_id, folder.name.casefold()): folder.id for folder in self.vault.folders()}
         imported = failed = 0

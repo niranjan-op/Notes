@@ -235,6 +235,10 @@ def _draw(name: str, color: str) -> Image.Image:
         pen.line((4, 15), (4, 19), (5, 20), (19, 20), (20, 19), (20, 15))
         pen.line((12, 15), (12, 4))
         pen.line((7.5, 8.5), (12, 4), (16.5, 8.5))
+    elif name == "image":
+        pen.rect(3.5, 4.5, 20.5, 19.5, radius=2.2)
+        pen.circle(8.5, 9.2, 1.5)
+        pen.line((4.5, 18.5), (10.5, 12.5), (14, 16), (16.5, 13.5), (19.5, 16.5))
     elif name == "close":
         pen.line((6, 6), (18, 18))
         pen.line((18, 6), (6, 18))
@@ -252,6 +256,42 @@ def icon_image(name: str, size: int = 18, tone: str = "muted") -> ctk.CTkImage:
     return img
 
 
+def _safe_configure_ctk_image(img: ctk.CTkImage, light_img: Image.Image, dark_img: Image.Image) -> None:
+    import tkinter as tk
+    # Keep previous PhotoImages referenced until live widgets switch to the new image,
+    # so Tk never deletes an active "pyimageN" while a label/button still references it.
+    old_photos = (
+        list(img._scaled_light_photo_images.values())
+        + list(img._scaled_dark_photo_images.values())
+    )
+    img._light_image = light_img
+    img._dark_image = dark_img
+    img._scaled_light_photo_images = {}
+    img._scaled_dark_photo_images = {}
+    img._check_images()
+
+    if getattr(tk, "_default_root", None) is None:
+        img._configure_callback_list.clear()
+        return
+
+    alive_callbacks = []
+    for callback in list(img._configure_callback_list):
+        owner = getattr(callback, "__self__", None)
+        if owner is not None:
+            try:
+                if not owner.winfo_exists():
+                    continue
+            except Exception:
+                continue
+        try:
+            callback()
+            alive_callbacks.append(callback)
+        except (RuntimeError, tk.TclError):
+            continue
+    img._configure_callback_list[:] = alive_callbacks
+    del old_photos
+
+
 def sync_brand_palette(is_mono: bool) -> None:
     """Switch cached brand icons and logos between Default and Monochrome palettes."""
     global _mono_active
@@ -260,11 +300,12 @@ def sync_brand_palette(is_mono: bool) -> None:
     _TONES.update(active_tones)
     for img, name, tone in _icon_registry:
         light, dark = _TONES[tone]
-        img.configure(light_image=_draw(name, light), dark_image=_draw(name, dark))
+        _safe_configure_ctk_image(img, _draw(name, light), _draw(name, dark))
     if _logo_registry:
         default_img, mono_light, mono_dark = _brand_logos()
         for logo in _logo_registry:
-            logo.configure(
-                light_image=mono_light if is_mono else default_img,
-                dark_image=mono_dark if is_mono else default_img,
+            _safe_configure_ctk_image(
+                logo,
+                mono_light if is_mono else default_img,
+                mono_dark if is_mono else default_img,
             )

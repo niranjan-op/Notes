@@ -58,10 +58,12 @@ class MainApp(ctk.CTk):
         self.minsize(min(940, width), min(580, height))
 
     def show_frame(self, page_name, context=None):
+        self._current_page = page_name
         frame = self.frames[page_name]
         if hasattr(frame, "update_view"):
             frame.update_view(context)
-        frame.tkraise()
+        if getattr(self, "_current_page", page_name) == page_name:
+            frame.tkraise()
 
     def on_close(self) -> None:
         """Flush pending edits and close the vault before exiting."""
