@@ -650,31 +650,44 @@ class ImageAndGifEditorTests(unittest.TestCase):
                 self.assertFalse(mv.pinned)
                 self.assertTrue(bool(mv.sidebar_frame.grid_info()))
 
-                # Enter sticky note mode -> collapses sidebar & backlinks, pins window, shrinks geometry
-                mv.toggle_sticky_mode()
-                app.update_idletasks()
-                self.assertTrue(mv.sticky_mode)
-                self.assertTrue(mv.pinned)
-                self.assertEqual(bool(app.attributes("-topmost")), True)
-                self.assertEqual(mv.sidebar_frame.grid_info(), {})
-                self.assertEqual(mv.context_panel.grid_info(), {})
+                topmost_calls: list[bool] = []
+                orig_attributes = app.attributes
 
-                # Independent pin toggle while in sticky mode
-                mv.toggle_pin_window()
-                app.update_idletasks()
-                self.assertTrue(mv.sticky_mode)
-                self.assertFalse(mv.pinned)
-                self.assertEqual(bool(app.attributes("-topmost")), False)
+                def spy_attributes(*args):
+                    if len(args) >= 2 and args[0] == "-topmost":
+                        topmost_calls.append(bool(args[1]))
+                    return orig_attributes(*args)
 
-                # Re-pin, then exit sticky mode -> restores sidebar & unpins window
-                mv.toggle_pin_window()
-                self.assertTrue(mv.pinned)
-                mv.toggle_sticky_mode()
-                app.update_idletasks()
-                self.assertFalse(mv.sticky_mode)
-                self.assertFalse(mv.pinned)
-                self.assertEqual(bool(app.attributes("-topmost")), False)
-                self.assertTrue(bool(mv.sidebar_frame.grid_info()))
+                app.attributes = spy_attributes
+                try:
+                    # Enter sticky note mode -> collapses sidebar & backlinks, pins window, shrinks geometry
+                    mv.toggle_sticky_mode()
+                    app.update_idletasks()
+                    self.assertTrue(mv.sticky_mode)
+                    self.assertTrue(mv.pinned)
+                    self.assertEqual(topmost_calls[-1], True)
+                    self.assertEqual(mv.sidebar_frame.grid_info(), {})
+                    self.assertEqual(mv.context_panel.grid_info(), {})
+
+                    # Independent pin toggle while in sticky mode
+                    mv.toggle_pin_window()
+                    app.update_idletasks()
+                    self.assertTrue(mv.sticky_mode)
+                    self.assertFalse(mv.pinned)
+                    self.assertEqual(topmost_calls[-1], False)
+
+                    # Re-pin, then exit sticky mode -> restores sidebar & unpins window
+                    mv.toggle_pin_window()
+                    self.assertTrue(mv.pinned)
+                    self.assertEqual(topmost_calls[-1], True)
+                    mv.toggle_sticky_mode()
+                    app.update_idletasks()
+                    self.assertFalse(mv.sticky_mode)
+                    self.assertFalse(mv.pinned)
+                    self.assertEqual(topmost_calls[-1], False)
+                    self.assertTrue(bool(mv.sidebar_frame.grid_info()))
+                finally:
+                    app.attributes = orig_attributes
             finally:
                 app.destroy()
                 cf.base_path = old_base
