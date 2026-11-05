@@ -3,7 +3,7 @@
 ; Or:     ISCC.exe packaging\installer.iss                 (expects dist\NotesApp)
 
 #define AppName "Secure Notes"
-#define AppVersion "1.4.0"
+#define AppVersion "1.5.0"
 #define AppPublisher "Niranjan Gadgil"
 #define AppExeName "NotesApp.exe"
 ; Must match APP_USER_MODEL_ID in app/UI/brand.py so the taskbar groups/pins correctly.

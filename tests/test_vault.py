@@ -616,6 +616,54 @@ class ImageAndGifEditorTests(unittest.TestCase):
             apply_color_theme("default")
             root.destroy()
 
+    def test_sticky_note_mode_and_pin_toggle_shrinks_and_restores_workspace(self) -> None:
+        import tempfile
+        from main import MainApp
+
+        with tempfile.TemporaryDirectory() as tmp:
+            old_base = cf.base_path
+            cf.base_path = tmp
+            app = MainApp()
+            app.withdraw()
+            try:
+                cf.create_filesystem_vault("StickyVault", parent_dir=Path(tmp) / "StickyRoot")
+                app.show_frame("MainView", context={"vault_name": "StickyVault", "password": ""})
+                app.update_idletasks()
+                mv = app.frames["MainView"]
+
+                self.assertFalse(mv.sticky_mode)
+                self.assertFalse(mv.pinned)
+                self.assertTrue(bool(mv.sidebar_frame.grid_info()))
+
+                # Enter sticky note mode -> collapses sidebar & backlinks, pins window, shrinks geometry
+                mv.toggle_sticky_mode()
+                app.update_idletasks()
+                self.assertTrue(mv.sticky_mode)
+                self.assertTrue(mv.pinned)
+                self.assertEqual(bool(app.attributes("-topmost")), True)
+                self.assertEqual(mv.sidebar_frame.grid_info(), {})
+                self.assertEqual(mv.context_panel.grid_info(), {})
+
+                # Independent pin toggle while in sticky mode
+                mv.toggle_pin_window()
+                app.update_idletasks()
+                self.assertTrue(mv.sticky_mode)
+                self.assertFalse(mv.pinned)
+                self.assertEqual(bool(app.attributes("-topmost")), False)
+
+                # Re-pin, then exit sticky mode -> restores sidebar & unpins window
+                mv.toggle_pin_window()
+                self.assertTrue(mv.pinned)
+                mv.toggle_sticky_mode()
+                app.update_idletasks()
+                self.assertFalse(mv.sticky_mode)
+                self.assertFalse(mv.pinned)
+                self.assertEqual(bool(app.attributes("-topmost")), False)
+                self.assertTrue(bool(mv.sidebar_frame.grid_info()))
+            finally:
+                app.destroy()
+                cf.base_path = old_base
+
 
 if __name__ == "__main__":
     unittest.main()

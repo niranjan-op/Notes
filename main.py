@@ -55,7 +55,8 @@ class MainApp(ctk.CTk):
         x = int((screen_w - width) / 2 * scaling)
         y = int((screen_h - height) / 3 * scaling)
         self.geometry(f"{width}x{height}+{max(0, x)}+{max(0, y)}")
-        self.minsize(min(940, width), min(580, height))
+        self._default_minsize = (min(940, width), min(580, height))
+        self.minsize(*self._default_minsize)
 
     def show_frame(self, page_name, context=None):
         self._current_page = page_name

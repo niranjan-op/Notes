@@ -16,7 +16,7 @@ import customtkinter as ctk
 from PIL import Image, ImageDraw
 
 APP_NAME = "Secure Notes"
-APP_VERSION = "1.4.0"   # keep in sync with packaging/installer.iss and packaging/version_info.txt
+APP_VERSION = "1.5.0"   # keep in sync with packaging/installer.iss and packaging/version_info.txt
 APP_USER_MODEL_ID = "SecureNotes.Desktop.App"
 
 _GRID = 24
@@ -239,6 +239,15 @@ def _draw(name: str, color: str) -> Image.Image:
         pen.rect(3.5, 4.5, 20.5, 19.5, radius=2.2)
         pen.circle(8.5, 9.2, 1.5)
         pen.line((4.5, 18.5), (10.5, 12.5), (14, 16), (16.5, 13.5), (19.5, 16.5))
+    elif name == "sticky":
+        pen.line((5, 4), (19, 4), (20, 5), (20, 14.5), (14.5, 20), (5, 20), (4, 19), (4, 5), closed=True)
+        pen.line((14.5, 20), (14.5, 15.5), (15.5, 14.5), (20, 14.5))
+        pen.line((8, 9), (16, 9))
+        pen.line((8, 12.5), (13, 12.5))
+    elif name == "pin":
+        pen.line((9, 4), (15, 4))
+        pen.line((10, 4), (9.5, 10), (6.5, 13), (17.5, 13), (14.5, 10), (14, 4))
+        pen.line((12, 13), (12, 20.5))
     elif name == "close":
         pen.line((6, 6), (18, 18))
         pen.line((18, 6), (6, 18))

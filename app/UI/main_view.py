@@ -82,6 +82,11 @@ class MainView(ctk.CTkFrame):
             self._editor_family = EDITOR_FONTS[0]
         self._context_visible = True
         self._auto_collapsed = False
+        self.sticky_mode = False
+        self.pinned = False
+        self._saved_geometry: str | None = None
+        self._sticky_geometry: str | None = None
+        self._pre_sticky_context_visible = True
         self.settings_dialog: Dialog | None = None
         self._build()
         self._bind_shortcuts()
@@ -91,7 +96,8 @@ class MainView(ctk.CTkFrame):
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(2, weight=1)
         self._build_sidebar()
-        ctk.CTkFrame(self, width=1, corner_radius=0, fg_color=Colors.border).grid(row=0, column=1, sticky="ns")
+        self.sidebar_divider = ctk.CTkFrame(self, width=1, corner_radius=0, fg_color=Colors.border)
+        self.sidebar_divider.grid(row=0, column=1, sticky="ns")
         self._build_editor()
         self.context_divider = ctk.CTkFrame(self, width=1, corner_radius=0, fg_color=Colors.border)
         self.context_divider.grid(row=0, column=3, sticky="ns")
@@ -101,6 +107,7 @@ class MainView(ctk.CTkFrame):
     def _build_sidebar(self) -> None:
         side = ctk.CTkFrame(self, width=Metrics.sidebar_width, fg_color=Colors.sidebar, corner_radius=0)
         side.grid(row=0, column=0, sticky="nsew")
+        self.sidebar_frame = side
         side.grid_propagate(False)
         side.grid_columnconfigure(0, weight=1)
         side.grid_rowconfigure(2, weight=1)
@@ -156,6 +163,7 @@ class MainView(ctk.CTkFrame):
         bar = ctk.CTkFrame(center, fg_color="transparent", height=44)
         bar.grid(row=0, column=0, sticky="ew", padx=(28, 12), pady=(6, 0))
         bar.grid_columnconfigure(0, weight=1)
+        self.editor_bar = bar
         self.breadcrumb = ctk.CTkLabel(bar, text="", font=Fonts.small, text_color=Colors.text_sub, anchor="w")
         self.breadcrumb.grid(row=0, column=0, sticky="ew")
         self.status = ctk.CTkLabel(bar, text="", font=Fonts.small, text_color=Colors.text_faint)
@@ -170,8 +178,18 @@ class MainView(ctk.CTkFrame):
             bar, "book", self.toggle_reading_mode, "Toggle reading mode  (Ctrl+R)"
         )
         self.reading_mode_button.grid(row=0, column=4, padx=(2, 0))
-        icon_button(bar, "panel_right", self.toggle_context_panel, "Toggle backlinks panel").grid(
-            row=0, column=5, padx=(2, 0))
+        self.sticky_button = icon_button(
+            bar, "sticky", self.toggle_sticky_mode, "Sticky note mode  (Ctrl+Shift+S)"
+        )
+        self.sticky_button.grid(row=0, column=5, padx=(2, 0))
+        self.pin_button = icon_button(
+            bar, "pin", self.toggle_pin_window, "Pin above other windows  (Ctrl+Shift+P)"
+        )
+        self.pin_button.grid(row=0, column=6, padx=(2, 0))
+        self.context_panel_button = icon_button(
+            bar, "panel_right", self.toggle_context_panel, "Toggle backlinks panel"
+        )
+        self.context_panel_button.grid(row=0, column=7, padx=(2, 0))
 
         self.title = ctk.CTkEntry(center, placeholder_text="Untitled", font=Fonts.title, border_width=0,
                                   fg_color="transparent", text_color=Colors.text,
@@ -233,6 +251,8 @@ class MainView(ctk.CTkFrame):
             "<Control-N>": lambda: self.new_folder(),
             "<Control-f>": self._focus_search,
             "<Control-I>": self.insert_image_dialog,
+            "<Control-S>": self.toggle_sticky_mode,
+            "<Control-P>": self.toggle_pin_window,
             "<Control-e>": self.toggle_editor_mode,
             "<Control-r>": self.toggle_reading_mode,
             "<Control-l>": self.lock,
@@ -338,6 +358,8 @@ class MainView(ctk.CTkFrame):
         self.selection = None
         self._all_notes, self._folders = [], []
         self._note_links.clear()
+        self.set_sticky_mode(False, announce=False)
+        self.set_pinned(False, announce=False)
         self.set_reading_mode(False, announce=False)
         self.md_controller.reset()
         self.md_controller.clear_media_cache()
@@ -1042,6 +1064,8 @@ class MainView(ctk.CTkFrame):
 
     # ------------------------------------------------------ panel & theming
     def toggle_context_panel(self) -> None:
+        if self.sticky_mode:
+            return
         self._auto_collapsed = False
         self._set_context_visible(not self._context_visible)
 
@@ -1054,7 +1078,85 @@ class MainView(ctk.CTkFrame):
             self.context_divider.grid_remove()
             self.context_panel.grid_remove()
 
+    def toggle_pin_window(self) -> None:
+        self.set_pinned(not self.pinned)
+
+    def set_pinned(self, pinned: bool, announce: bool = True) -> None:
+        self.pinned = bool(pinned)
+        root = self.controller
+        try:
+            root.attributes("-topmost", self.pinned)
+        except tk.TclError:
+            pass
+        self.pin_button.configure(
+            image=icon_image("pin", 17, "primary" if self.pinned else "muted"),
+            fg_color=Colors.selected if self.pinned else "transparent",
+        )
+        if announce and self.note_id is not None:
+            self.status.configure(
+                text="Pinned on top" if self.pinned else "Unpinned",
+                text_color=Colors.primary if self.pinned else Colors.text_faint,
+            )
+
+    def toggle_sticky_mode(self) -> None:
+        self.set_sticky_mode(not self.sticky_mode)
+
+    def set_sticky_mode(self, enabled: bool, announce: bool = True) -> None:
+        enabled = bool(enabled)
+        if enabled == self.sticky_mode:
+            return
+        root = self.controller
+        self.sticky_mode = enabled
+        self.sticky_button.configure(
+            image=icon_image("sticky", 17, "primary" if enabled else "muted"),
+            fg_color=Colors.selected if enabled else "transparent",
+        )
+        if enabled:
+            self._saved_geometry = root.geometry()
+            self._pre_sticky_context_visible = self._context_visible
+            self.sidebar_frame.grid_remove()
+            self.sidebar_divider.grid_remove()
+            self.context_divider.grid_remove()
+            self.context_panel.grid_remove()
+            self._context_visible = False
+            self.editor_bar.grid_configure(padx=(12, 8), pady=(4, 0))
+            self.title.grid_configure(padx=(12, 12), pady=(2, 2))
+            self.editor.grid_configure(padx=(12, 4), pady=(0, 8))
+            root.minsize(260, 260)
+            if self._sticky_geometry:
+                root.geometry(self._sticky_geometry)
+            else:
+                scaling = ctk.ScalingTracker.get_window_scaling(root)
+                screen_w = root.winfo_screenwidth() / scaling
+                w, h = 360, 420
+                x = int(max(16, (screen_w - w - 32) * scaling))
+                y = int(48 * scaling)
+                root.geometry(f"{w}x{h}+{x}+{y}")
+            self.set_pinned(True, announce=False)
+            if announce and self.note_id is not None:
+                self.status.configure(text="Sticky note", text_color=Colors.primary)
+        else:
+            try:
+                self._sticky_geometry = root.geometry()
+            except tk.TclError:
+                pass
+            self.sidebar_frame.grid()
+            self.sidebar_divider.grid()
+            self.editor_bar.grid_configure(padx=(28, 12), pady=(6, 0))
+            self.title.grid_configure(padx=(24, 28), pady=(4, 2))
+            self.editor.grid_configure(padx=(24, 8), pady=(0, 12))
+            self._set_context_visible(self._pre_sticky_context_visible)
+            default_min = getattr(root, "_default_minsize", (940, 580))
+            root.minsize(*default_min)
+            if self._saved_geometry:
+                root.geometry(self._saved_geometry)
+            self.set_pinned(False, announce=False)
+            if announce and self.note_id is not None:
+                self.status.configure(text="", text_color=Colors.text_faint)
+
     def _on_resize(self, _event=None) -> None:
+        if self.sticky_mode:
+            return
         logical = self.winfo_width() / ctk.ScalingTracker.get_widget_scaling(self)
         if logical <= 1:  # not mapped yet
             return
