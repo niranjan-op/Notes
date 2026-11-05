@@ -391,6 +391,15 @@ class ImageAndGifEditorTests(unittest.TestCase):
         ])
         self.assertEqual(Vault.links(line), {"RealNote"})
 
+    def _create_gui_or_skip(self, factory):
+        import tkinter as tk
+        try:
+            win = factory()
+            win.withdraw()
+            return win
+        except tk.TclError as exc:
+            self.skipTest(f"Display unavailable for GUI test: {exc}")
+
     def test_editor_controller_inserts_and_renders_images_and_animated_gifs(self):
         import io
         import tkinter as tk
@@ -399,11 +408,13 @@ class ImageAndGifEditorTests(unittest.TestCase):
         from app.UI.brand import icon_image
         from app.UI.markdown_editor import MarkdownEditorController, serialize_pil_image
 
-        root = tk.Tk()
-        root.withdraw()
+        # Verify the new image/sticky/pin toolbar icons render cleanly even without a display
+        self.assertIsNotNone(icon_image("image", 16))
+        self.assertIsNotNone(icon_image("sticky", 16))
+        self.assertIsNotNone(icon_image("pin", 16))
+
+        root = self._create_gui_or_skip(tk.Tk)
         try:
-            # Verify the new image toolbar icon renders cleanly
-            self.assertIsNotNone(icon_image("image", 16))
 
             store: dict[str, bytes] = {}
 
@@ -454,8 +465,7 @@ class ImageAndGifEditorTests(unittest.TestCase):
         import customtkinter as ctk
         from app.UI.markdown_editor import MarkdownEditorController
 
-        root = ctk.CTk()
-        root.withdraw()
+        root = self._create_gui_or_skip(ctk.CTk)
         try:
             textbox = ctk.CTkTextbox(root, width=600, height=400)
             textbox.pack()
@@ -548,8 +558,11 @@ class ImageAndGifEditorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             old_base = cf.base_path
             cf.base_path = tmp
-            app = MainApp()
-            app.withdraw()
+            try:
+                app = self._create_gui_or_skip(MainApp)
+            except BaseException:
+                cf.base_path = old_base
+                raise
             try:
                 cf.create_filesystem_vault("u", parent_dir=Path(tmp) / "CustomRoot")
                 app.show_frame("MainView", context={"vault_name": "u", "password": ""})
@@ -579,8 +592,7 @@ class ImageAndGifEditorTests(unittest.TestCase):
 
         ctk.set_appearance_mode("dark")
         apply_color_theme("default")
-        root = ctk.CTk(fg_color=Colors.card)
-        root.withdraw()
+        root = self._create_gui_or_skip(lambda: ctk.CTk(fg_color=Colors.card))
         try:
             # Create and destroy widgets using cached icons (simulating tree refresh / closing Settings)
             dead_lbl = ctk.CTkLabel(root, text="", image=icon_image("folder", 15))
@@ -623,8 +635,11 @@ class ImageAndGifEditorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             old_base = cf.base_path
             cf.base_path = tmp
-            app = MainApp()
-            app.withdraw()
+            try:
+                app = self._create_gui_or_skip(MainApp)
+            except BaseException:
+                cf.base_path = old_base
+                raise
             try:
                 cf.create_filesystem_vault("StickyVault", parent_dir=Path(tmp) / "StickyRoot")
                 app.show_frame("MainView", context={"vault_name": "StickyVault", "password": ""})
